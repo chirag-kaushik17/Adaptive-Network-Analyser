@@ -9,5 +9,8 @@ __pycache__/
 *.tar.gz
 *.gz
 data/**/*.csv
+data/**/*.csv.meta.json
+logs/
+models/
 reports/*
 !reports/.gitkeep

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -73,7 +73,6 @@ def window_features(
     for key, group in ordered.groupby("window_index", sort=True):
         total_flows = len(group)
         bytes_total = float(group["bytes"].sum())
-        with_attack = group[group["label"].astype(str).ne("normal")]
         label = _window_label(group, min_attack_flows=min_attack_flows, min_attack_frac=min_attack_frac)
         if total_flows == 0:
             continue
