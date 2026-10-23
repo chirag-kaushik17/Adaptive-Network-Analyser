@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.pyc
+*.pyo
+*.zip
+*.tar
+*.tar.gz
+*.gz
+data/**/*.csv
+data/**/*.csv.meta.json
+logs/
+models/
+reports/*
+!reports/.gitkeep
