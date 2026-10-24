@@ -71,3 +71,74 @@ configuration.
 The sweep took 201.34 seconds on Windows 11, Intel Core Ultra 5 125H
 (14 physical / 18 logical cores), Python 3.13.5, NumPy 2.5.4, pandas 3.0.6,
 scikit-learn 1.9.1.
+
+## Phase 4 decisions
+
+### Drift statistics and safeguards
+
+PSI is the primary statistic. It uses ten reference-quantile bins, removes
+duplicate quantile edges, and applies epsilon smoothing to empty bins. A
+reference feature with zero variance is skipped and reports no statistic;
+non-finite values are excluded per feature. The optional KS mode computes the
+two-sample empirical-CDF distance in NumPy, so Phase 4 adds no dependency.
+`psi_threshold` is the comparison threshold for either selected statistic.
+
+Each check compares the most recent configured number of observed feature
+rows with the current fit reference. A feature counts only when its statistic
+exceeds the threshold; at least `min_features` must exceed it at
+`persistence` consecutive checks. Checks are separated by `check_every` rows.
+The monitor enters cooldown after an event or after a model refit, including
+periodic refits. Tuned values and their development-only evidence are recorded
+in `configs/defaults.json` and `logs/phase4_drift_sweep.txt`.
+
+### Monitor input and drift refit set
+
+The monitor sees every post-warm-up feature row, including rows flagged by
+Layer 1. This avoids the deadlock where the old detector flags every
+new-regime window, the buffer rejects them, and an admitted-only monitor can
+never accumulate evidence. It receives only the numeric feature vector:
+ground-truth labels and sidecar metadata are not monitor inputs.
+
+On a drift event, drift-trigger mode fits on the most recent `history`
+observed rows, including flagged rows. This is an explicit exception to the
+normal buffer-admission rule, limited to drift-trigger refits. It lets a
+detector adapt when the old model rejects the new regime. The tradeoff is
+that a sustained attack burst could be included if it also meets the
+persistence and multi-feature drift guards; `stable_attacks` runs measure
+that failure mode. Periodic mode continues to refit on the unflagged buffer
+only and retains Phase 3R score, flag, and refit behavior.
+The seed-100 default periodic CLI check retained the recorded Phase 3R
+fingerprint: TP=269, FP=3, FN=1, and 26 periodic refits
+(`logs/phase4_periodic_compatibility.txt`).
+
+### Development tuning
+
+The selector is fixed before held-out runs: require zero events on every
+development `stable` and `stable_attacks` run, then minimize median detection
+delay on `drift`. Only data seeds 1, 2, and 3 are used. The complete candidate
+table, including per-seed event positions and false-run counts, is saved in
+`logs/phase4_drift_sweep.txt`; the chosen parameter values and selection
+verdict are recorded in the new `drift` configuration section. If no
+zero-false candidate exists, the log reports that fact and records the
+minimum measured false-run candidate without claiming the criterion passed.
+
+The 32-candidate sweep found no zero-false candidate. No events occurred on
+the three `stable` runs; every `stable_attacks` development run had at least
+one event (3/3, a 100% per-run false-drift rate on this hard negative). The
+fallback selected PSI threshold **0.50**, minimum **4** shifted features,
+persistence **2**, **40** test windows, and a check interval of **20**
+windows. The median first-event delay on `drift` was **59 windows**. These
+values are a measured compromise, not a pass of the zero-false selection
+criterion; attack-induced false drift remains an open failure mode.
+
+| Candidate | Stable events | Stable-attack event runs | Median drift delay |
+| --- | ---: | ---: | ---: |
+| PSI 0.25; 3 features; persistence 2; 40 test; check 10 | 3/3 | 3/3 | 19 windows |
+| PSI 0.25; 4 features; persistence 3; 60 test; check 20 | 1/3 | 3/3 | 69 windows |
+| **PSI 0.50; 4 features; persistence 2; 40 test; check 20 (selected)** | **0/3** | **3/3** | **59 windows** |
+| PSI 0.50; 4 features; persistence 3; 60 test; check 20 | 0/3 | 3/3 | 89 windows |
+
+The complete per-seed result for every candidate is in
+`logs/phase4_drift_sweep.txt`. The chosen candidate minimizes false-run count
+first because the required zero-false set was empty; it does not minimize
+detection delay across the full grid.

@@ -169,13 +169,39 @@ def generate_synthetic_data(
     stealth_start: float | None = None,
     stealth_duration: float = 0.0,
     stealth_amp: float = 0.0,
+    scenario: str | None = None,
 ) -> pd.DataFrame:
     """Generate clean warm-up traffic, optional attacks, drift, and stealth."""
     if warmup < 1 or window <= 0:
         raise ValueError("warmup must be positive and window must be greater than zero.")
     if tail_duration < 0 or stealth_duration < 0 or stealth_amp < 0:
         raise ValueError("tail_duration, stealth_duration, and stealth_amp cannot be negative.")
+    if scenario is not None:
+        scenario_settings = {
+            "stable": (False, False),
+            "stable_attacks": (True, False),
+            "drift": (False, True),
+            "drift_attacks": (True, True),
+        }
+        if scenario not in scenario_settings:
+            raise ValueError(
+                "scenario must be 'stable', 'stable_attacks', 'drift', or 'drift_attacks'."
+            )
+        attacks, drift = scenario_settings[scenario]
+        if drift:
+            if drift_start is None:
+                drift_start = (warmup + 30) * window
+            if drift_end is None:
+                drift_end = (warmup + 330) * window
+        else:
+            drift_strength = 0.0
     warmup_seconds = warmup * window
+    if (
+        scenario in {"drift", "drift_attacks"}
+        and drift_start is not None
+        and drift_start <= warmup_seconds
+    ):
+        raise ValueError("Named drift scenarios must start after warm-up.")
     explicit_attack_start = attack_start is not None
     explicit_drift_start = drift_start is not None
     explicit_stealth_start = stealth_start is not None
@@ -190,10 +216,19 @@ def generate_synthetic_data(
 
     drift_active = drift or drift_strength > 0
     effective_drift_strength = 1.0 if drift and drift_strength == 0 else drift_strength
+    frame_attacks = attacks
+    frame_drift = drift_active
     if drift_active and drift_start is None:
         drift_start = warmup_seconds
     if drift_active and drift_start is not None and drift_end is None:
         drift_end = max(drift_start + window, warmup_seconds + 300 * window)
+    if (
+        drift_active
+        and drift_start is not None
+        and drift_end is not None
+        and drift_end <= drift_start
+    ):
+        raise ValueError("drift_end must be later than drift_start.")
 
     if attacks and stealth_duration > 0 and stealth_amp > 0 and stealth_start is None:
         stealth_start = warmup_seconds
@@ -203,7 +238,7 @@ def generate_synthetic_data(
             float(attack_start), n_cycles, attack_duration, attack_gap,
             attack_order, seed,
         )
-        if attacks
+        if frame_attacks
         else []
     )
     scheduled_attack_end = float(episodes[-1]["end"]) if episodes else warmup_seconds
@@ -228,6 +263,11 @@ def generate_synthetic_data(
             raise ValueError("seconds ends before a configured traffic event.")
         if attacks and float(seconds) < required_end:
             raise ValueError("seconds is too short to contain the configured attacks and normal tail.")
+        if (
+            scenario in {"drift", "drift_attacks"}
+            and float(seconds) < required_end
+        ):
+            raise ValueError("seconds is too short to include the drift and post-drift tail.")
         total_seconds = float(seconds)
     else:
         total_seconds = required_end
@@ -268,6 +308,12 @@ def generate_synthetic_data(
         raise AssertionError("Synthetic generator violated the clean warm-up invariant.")
     frame.attrs["duration_seconds"] = total_seconds
     frame.attrs["warmup_seconds"] = warmup_seconds
+    frame.attrs["scenario"] = scenario
+    frame.attrs["attacks"] = frame_attacks
+    frame.attrs["drift_active"] = frame_drift
+    frame.attrs["drift_start"] = drift_start if drift_active else None
+    frame.attrs["drift_end"] = drift_end if drift_active else None
+    frame.attrs["drift_strength"] = effective_drift_strength if drift_active else 0.0
     return frame
 
 
@@ -278,6 +324,7 @@ def generate_synthetic_csv(
     attack_start: float | None = None,
     attacks: bool = True,
     drift: bool = False,
+    scenario: str | None = None,
     **kwargs,
 ) -> pd.DataFrame:
     """Write flows and schedule metadata, which is never used as model input."""
@@ -287,6 +334,7 @@ def generate_synthetic_csv(
         attack_start=attack_start,
         attacks=attacks,
         drift=drift,
+        scenario=scenario,
         **kwargs,
     )
     output = Path(path)
@@ -294,6 +342,7 @@ def generate_synthetic_csv(
     frame.to_csv(output, index=False)
     warmup_seconds = kwargs.get("warmup", 120) * kwargs.get("window", 1.0)
     active_attack_start = attack_start if attack_start is not None else warmup_seconds
+    active_attacks = frame.attrs["attacks"]
     episodes = (
         build_attack_schedule(
             active_attack_start,
@@ -303,21 +352,13 @@ def generate_synthetic_csv(
             kwargs.get("attack_order", "fixed"),
             seed,
         )
-        if attacks
+        if active_attacks
         else []
     )
-    drift_active = drift or kwargs.get("drift_strength", 0.0) > 0
-    active_drift_start = kwargs.get("drift_start")
-    if drift_active and active_drift_start is None:
-        active_drift_start = warmup_seconds
-    active_drift_end = kwargs.get("drift_end")
-    if drift_active and active_drift_end is None:
-        active_drift_end = max(
-            active_drift_start + kwargs.get("window", 1.0),
-            warmup_seconds + 300 * kwargs.get("window", 1.0),
-        )
+    active_drift_start = frame.attrs["drift_start"]
+    active_drift_end = frame.attrs["drift_end"]
     stealth_active = (
-        attacks
+        frame.attrs["attacks"]
         and kwargs.get("stealth_duration", 0.0) > 0
         and kwargs.get("stealth_amp", 0.0) > 0
     )
@@ -328,9 +369,9 @@ def generate_synthetic_csv(
     metadata = {
         "seed": seed,
         "warmup_seconds": warmup_seconds,
-        "attack_start": active_attack_start if attacks else None,
+        "attack_start": active_attack_start if frame.attrs["attacks"] else None,
         "episodes": episodes,
-        "attacks": attacks,
+        "attacks": frame.attrs["attacks"],
         "attack_order": kwargs.get("attack_order", "fixed"),
         "attack_duration": kwargs.get("attack_duration", 30.0),
         "attack_gap": kwargs.get("attack_gap", 40.0),
@@ -338,12 +379,10 @@ def generate_synthetic_csv(
         "tail_duration": kwargs.get("tail_duration", 190.0),
         "window_seconds": kwargs.get("window", 1.0),
         "duration_seconds": frame.attrs["duration_seconds"],
-        "drift_start": active_drift_start if drift_active else None,
-        "drift_end": active_drift_end if drift_active else None,
-        "drift_strength": (
-            1.0 if drift and kwargs.get("drift_strength", 0.0) == 0
-            else kwargs.get("drift_strength", 0.0)
-        ),
+        "scenario": scenario,
+        "drift_start": active_drift_start,
+        "drift_end": active_drift_end,
+        "drift_strength": frame.attrs["drift_strength"],
         "stealth_start": active_stealth_start,
         "stealth_duration": kwargs.get("stealth_duration", 0.0),
         "stealth_amp": kwargs.get("stealth_amp", 0.0),
@@ -366,6 +405,10 @@ def main() -> None:
     parser.add_argument("--attack-duration", type=float, default=30.0)
     parser.add_argument("--attack-gap", type=float, default=40.0)
     parser.add_argument("--tail-duration", type=float, default=190.0)
+    parser.add_argument(
+        "--scenario",
+        choices=["stable", "stable_attacks", "drift", "drift_attacks"],
+    )
     parser.add_argument("--attack-order", choices=["fixed", "shuffled"], default="fixed")
     parser.add_argument("--no-attacks", action="store_true")
     parser.add_argument("--drift", action="store_true")
@@ -385,6 +428,7 @@ def main() -> None:
         attack_start=args.attack_start,
         attacks=not args.no_attacks,
         drift=args.drift,
+        scenario=args.scenario,
         warmup=args.warmup,
         window=args.window,
         n_cycles=args.n_cycles,

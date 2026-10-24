@@ -1,10 +1,12 @@
 # Adaptive Network Traffic Analyzer
 
-ATA builds a flow-level anomaly detector in phases. The implemented scope in
-this repository is Phases 0–3R: the CIC/synthetic data layer, time-window
-features, and the unsupervised Layer 1 Isolation Forest baselines. Drift
-detection, a supervised classifier, explanations, and a serving API are not
-implemented in this phase.
+ATA builds a flow-level network traffic analyzer in phases. This repository
+contains the CIC/synthetic data layer, time-window features, unsupervised
+Layer 1 Isolation Forest baselines, PSI/KS drift detection, supervised Layer 2
+classifiers with SHAP explanations, a replayable streaming API, SQLite alert
+storage, and a local Streamlit dashboard. The frozen Phase 5 Layer 1 research
+result remains **FAIL / NO-GO**; this does not prevent the later engineering
+phases from running.
 
 ## Environment and tests
 
@@ -99,6 +101,16 @@ for a unit-strength drift. `--no-attacks` prevents attack and stealth flows.
 `--attack-order shuffled` deterministically shuffles each cycle for later
 classifier evaluation.
 
+Named deterministic scenarios are available with `--scenario stable`,
+`--scenario stable_attacks`, `--scenario drift`, and
+`--scenario drift_attacks`. The default remains the existing attack schedule
+without drift. `stable` contains normal traffic only; `stable_attacks` is the
+hard negative for false drift events; `drift` contains normal traffic with a
+gradual change after warm-up; and `drift_attacks` combines the change and
+attack schedule. A named scenario takes precedence over `--no-attacks` and
+`--drift`. The sidecar records drift start/end and is used only for evaluation
+delay, never as model input.
+
 Every duration parameter is in seconds unless its name explicitly says
 `windows`. Warm-up and history values are windows. Defaults assume a 1-second
 window. CIC commands use 60-second windows, so an equal number of windows
@@ -120,6 +132,16 @@ contamination value and the development-seed evidence are in
 `--baseline static`. Synthetic output is **not** evidence of real-world
 detection quality.
 
+Drift detection can be selected with `--drift-method psi|ks`; use
+`--refit-trigger drift` to refit after a persistent drift event instead of on
+the periodic interval. The default is `--refit-trigger periodic`, preserving
+Phase 3R behavior. The CLI reports drift event count, first event window,
+detection delay when sidecar metadata is available, and refit count. The
+monitor receives feature rows only. Drift-triggered refits use recent stream
+history, including flagged rows, so a rejected new regime can be learned; this
+differs intentionally from ordinary unflagged-buffer admission and can admit
+attack contamination.
+
 For a CIC TrafficLabelling file, use settings appropriate to 60-second
 windows, for example:
 
@@ -137,3 +159,107 @@ admission.
 Synthetic and real CIC results must always be reported separately. The
 synthetic generator is simplified and deterministic, and does not establish
 real-world performance.
+
+Compare static, periodic-adaptive, and drift-adaptive Layer 1 baselines on
+the fixed evaluation seeds and generate JSON/PNG reports with:
+
+```powershell
+python -m ata.evaluate --seeds 200 201 202 203 204 --out reports
+```
+
+The evaluation reports synthetic results only unless CIC data is separately
+provided. Its frozen GO/NO-GO verdict is a **research acceptance result**, not
+an engineering test gate; Phase 6 can be implemented and tested while the
+Layer 1 result remains NO-GO. Never represent a NO-GO as a PASS.
+
+## Layer 2 classifier and explainability
+
+Layer 2 compares a class-weighted XGBoost classifier with a class-weighted
+Random Forest. Hyperparameters and model choice are selected on development
+seeds 1–3 only and recorded under `classifier` in
+`configs/defaults.json`. The reported run uses seeds 200–204. For each seed,
+synthetic attack order is shuffled and five cycles ensure every target class
+appears on both sides of the chronological split. The first 65% of windows
+are training data, followed by a five-window gap and the test segment. The
+classifier input is exactly the 11 columns in `FEATURE_COLUMNS`; labels are
+targets only, and window indices are used only to preserve order.
+
+Run the classifier evaluation and generate reports:
+
+```powershell
+python -m ata.classify --seeds 200 201 202 203 204 --out reports
+```
+
+The CLI prints per-class precision, recall, F1, and support for both models,
+plus macro averages. It writes `reports/classifier_metrics.json`,
+`reports/confusion_matrix_xgboost.png`,
+`reports/confusion_matrix_random_forest.png`, `reports/shap_summary.png`, and
+`reports/alerts_sample.jsonl`. Each sample alert has exactly three
+class-specific SHAP features. The JSON report keeps Layer 1 research
+acceptance separate from Phase 6 engineering status. These are synthetic
+demonstration results, not evidence of real-world performance; CIC remains
+SKIPPED until TrafficLabelling data is provided.
+
+## Streaming API and dashboard
+
+The streaming source reuses the existing flow loader and schema. It orders
+flows by timestamp, feeds them incrementally into the same window aggregator
+and Layer 1 baseline, and flushes the final partial window. Alerts are stored
+as JSON-backed records in SQLite; raw packet contents are not stored.
+
+On Windows, run `run.bat` from the project folder to start the API and
+dashboard in separate terminal windows.
+
+Start the local API from PowerShell:
+
+```powershell
+python -m ata.serve --host 127.0.0.1 --port 8000 --database data/ata_alerts.sqlite3
+```
+
+The service exposes `GET /health`, `POST /flows`, `POST /score`,
+`POST /flush`, `GET /alerts`, `GET /alerts/{alert_id}`, and `GET /stats`.
+Replay an existing synthetic CSV into it from a second terminal:
+
+```powershell
+python -m ata.replay --csv data/synth.csv --dataset synth --url http://127.0.0.1:8000 --batch 2000 --speed 0
+```
+
+`--speed 0` replays as quickly as possible; a positive speed is a timing
+multiplier. The replay command finalizes the last incomplete window and writes
+`reports/phase7_replay_summary.json`. CIC CSVs can be replayed with
+`--dataset cicids2017` and the loader's date-order options.
+
+By default there is no saved Phase 6 model artifact, so the server emits
+explicit `unknown` classifications and no SHAP features for Layer 1 alerts.
+For an optional in-memory classifier demonstration, start the server with
+`--with-classifier`; this trains from development seed 1 and does not load or
+create a persistent model artifact.
+
+Run the Streamlit dashboard in another terminal:
+
+```powershell
+python -m streamlit run src/ata/dashboard.py
+```
+
+It connects to `http://127.0.0.1:8000` by default. Set `ATA_API_URL` to change
+the endpoint. The dashboard separates current API telemetry and alerts from
+the saved historical Phase 5/6 evaluation reports; a Phase 5 NO-GO remains
+visible and is not converted into an engineering status.
+
+Measure local throughput with:
+
+```powershell
+python -m ata.bench --csv data/synth.csv --dataset synth --batch 2000 --out reports/throughput.json
+```
+
+The benchmark reports aggregation, full-pipeline, and in-process FastAPI
+`TestClient` timings. The API timing excludes Uvicorn socket/process overhead;
+all such throughput values are local engineering measurements, not capacity
+guarantees or evidence of real-world detection performance.
+
+**Security and data limitations:** the API has no authentication or TLS and
+must stay bound to localhost; do not expose it to an untrusted network. The
+existing CSV loader materializes its input before replay, so replay is
+incremental after loading but is not a chunked large-file reader. Demonstration
+results are synthetic; real CIC validation is **SKIPPED** until
+TrafficLabelling CSVs are supplied.

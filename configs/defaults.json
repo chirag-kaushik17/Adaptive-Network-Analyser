@@ -4,6 +4,159 @@
   "history_windows": 300,
   "refit_every_windows": 30,
   "model_seed": 0,
+  "classifier": {
+    "train_fraction": 0.65,
+    "gap_windows": 5,
+    "n_cycles": 5,
+    "dev_seeds": [
+      1,
+      2,
+      3
+    ],
+    "model_seed": 0,
+    "selected_model": "random_forest",
+    "xgboost": {
+      "parameters": {
+        "n_estimators": 100,
+        "max_depth": 3,
+        "learning_rate": 0.1,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9
+      }
+    },
+    "random_forest": {
+      "parameters": {
+        "n_estimators": 100,
+        "max_depth": null,
+        "max_features": "sqrt"
+      }
+    },
+    "development_selection": {
+      "dev_seeds": [
+        1,
+        2,
+        3
+      ],
+      "criterion": "maximum mean macro F1 across chronological development test splits; ties prefer Random Forest for simpler interpretation",
+      "mean_macro_f1": {
+        "xgboost": 1.0,
+        "random_forest": 1.0
+      },
+      "candidate_macro_f1": {
+        "xgboost": [
+          {
+            "parameters": {
+              "n_estimators": 100,
+              "max_depth": 3,
+              "learning_rate": 0.1,
+              "subsample": 0.9,
+              "colsample_bytree": 0.9
+            },
+            "mean_macro_f1": 1.0
+          },
+          {
+            "parameters": {
+              "n_estimators": 160,
+              "max_depth": 3,
+              "learning_rate": 0.1,
+              "subsample": 0.9,
+              "colsample_bytree": 0.9
+            },
+            "mean_macro_f1": 1.0
+          },
+          {
+            "parameters": {
+              "n_estimators": 100,
+              "max_depth": 5,
+              "learning_rate": 0.1,
+              "subsample": 0.9,
+              "colsample_bytree": 0.9
+            },
+            "mean_macro_f1": 1.0
+          },
+          {
+            "parameters": {
+              "n_estimators": 160,
+              "max_depth": 5,
+              "learning_rate": 0.1,
+              "subsample": 0.9,
+              "colsample_bytree": 0.9
+            },
+            "mean_macro_f1": 1.0
+          }
+        ],
+        "random_forest": [
+          {
+            "parameters": {
+              "n_estimators": 100,
+              "max_depth": null,
+              "max_features": "sqrt"
+            },
+            "mean_macro_f1": 1.0
+          },
+          {
+            "parameters": {
+              "n_estimators": 200,
+              "max_depth": null,
+              "max_features": "sqrt"
+            },
+            "mean_macro_f1": 1.0
+          },
+          {
+            "parameters": {
+              "n_estimators": 100,
+              "max_depth": 16,
+              "max_features": "sqrt"
+            },
+            "mean_macro_f1": 1.0
+          },
+          {
+            "parameters": {
+              "n_estimators": 200,
+              "max_depth": 16,
+              "max_features": "sqrt"
+            },
+            "mean_macro_f1": 1.0
+          }
+        ]
+      },
+      "selected_model": "random_forest",
+      "reason": "Both models tied at development mean macro F1 1.0000; Random Forest was selected by the documented simpler-interpretation tie-break, using seeds 1-3 only."
+    }
+  },
+  "drift": {
+    "method": "psi",
+    "psi_threshold": 0.5,
+    "min_features": 4,
+    "persistence": 2,
+    "test_windows": 40,
+    "check_every": 20,
+    "cooldown": 30,
+    "selection": {
+      "dev_seeds": [
+        1,
+        2,
+        3
+      ],
+      "scenarios": [
+        "stable",
+        "stable_attacks",
+        "drift"
+      ],
+      "criterion": "zero events on stable and stable_attacks, then smallest median detection delay on drift",
+      "verdict": "NO ZERO-FALSE CANDIDATE; selected minimum measured false-run count",
+      "false_runs": 3,
+      "median_drift_delay_windows": 59,
+      "candidate_count": 32,
+      "chosen_parameters": {
+        "psi_threshold": 0.5,
+        "min_features": 4,
+        "persistence": 2,
+        "test_windows": 40,
+        "check_every": 20
+      }
+    }
+  },
   "selection": {
     "dev_seeds": [
       1,
