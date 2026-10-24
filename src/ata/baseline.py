@@ -10,6 +10,7 @@ from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
 from .drift import DriftMonitor, n_shifted_features
+from .features import FEATURE_COLUMNS
 
 
 class BaseBaseline:
@@ -29,6 +30,14 @@ class BaseBaseline:
         min_flag_frac: float = 0.30,
         promotion_cooldown: int = 30,
         drift_monitor: DriftMonitor | None = None,
+        refit_trigger: str = "periodic",
+        drift_method: str = "psi",
+        psi_threshold: float = 0.25,
+        min_drift_features: int = 3,
+        drift_persistence: int = 2,
+        test_windows: int = 60,
+        check_every: int = 10,
+        drift_cooldown: int = 30,
     ):
         if warmup < 2:
             raise ValueError("warmup must be at least 2 windows.")
@@ -40,6 +49,8 @@ class BaseBaseline:
             raise ValueError("contamination must be strictly between 0 and 0.5.")
         if policy not in {"strict", "quarantine"}:
             raise ValueError("policy must be 'strict' or 'quarantine'.")
+        if refit_trigger not in {"periodic", "drift"}:
+            raise ValueError("refit_trigger must be 'periodic' or 'drift'.")
         if severity_beta <= 0:
             raise ValueError("severity_beta must be greater than zero.")
         if promote_after <= 0:
@@ -66,7 +77,17 @@ class BaseBaseline:
         self.promote_after = int(promote_after)
         self.min_flag_frac = float(min_flag_frac)
         self.promotion_cooldown = int(promotion_cooldown)
-        self.drift_monitor = drift_monitor if drift_monitor is not None else DriftMonitor()
+        self.refit_trigger = refit_trigger
+        self._default_drift_monitor = drift_monitor is None
+        self.drift_monitor = drift_monitor if drift_monitor is not None else DriftMonitor(
+            min_features=min_drift_features,
+            test_windows=test_windows,
+            method=drift_method,
+            psi_threshold=psi_threshold,
+            persistence=drift_persistence,
+            check_every=check_every,
+            cooldown=drift_cooldown,
+        )
         self.scaler = StandardScaler()
         self.forest = IsolationForest(
             contamination=self.contamination, random_state=self.seed
@@ -81,6 +102,7 @@ class BaseBaseline:
         self.last_cap: float | None = None
         self.last_promotion_position: int | None = None
         self.drift_events: list[dict] = []
+        self.drift_refit_events: list[dict] = []
         self.promotion_events: list[dict] = []
         self._post_warmup_seen = 0
         self._refit_calls = 0
@@ -89,6 +111,7 @@ class BaseBaseline:
         self._step_count = 0
         self._n_features: int | None = None
         self._window_log: list[dict] = []
+        self._recent_stream_rows: list[np.ndarray] = []
 
     @property
     def n_refits(self) -> int:
@@ -121,6 +144,11 @@ class BaseBaseline:
             self.skipped_refits += 1
             return
         matrix = np.vstack(rows)
+        if (
+            self._default_drift_monitor
+            and matrix.shape[1] == len(FEATURE_COLUMNS)
+        ):
+            self.drift_monitor.feature_names = tuple(FEATURE_COLUMNS)
         self.scaler.fit(matrix)
         self.forest = IsolationForest(
             contamination=self.contamination, random_state=self.seed
@@ -130,6 +158,7 @@ class BaseBaseline:
         self._fitted = True
         if not initial:
             self._refit_calls += 1
+        self.drift_monitor.reset_reference(matrix)
 
     def _score_flag(self, row: np.ndarray) -> tuple[float, bool]:
         if not self._fitted:
@@ -149,6 +178,8 @@ class BaseBaseline:
         return cap
 
     def _refit_if_needed(self, *, force: bool = False) -> None:
+        if self.refit_trigger == "drift":
+            return
         if self.refit_every is None and not force:
             return
         if not force and self._post_warmup_seen % self.refit_every != 0:
@@ -158,6 +189,47 @@ class BaseBaseline:
             self.skipped_refits += 1
             return
         self._fit_model(fit_rows)
+
+    def _observe_drift(self, row: np.ndarray, position: int) -> bool:
+        drifted = self.drift_monitor.update(row, position=position)
+        if drifted:
+            result = self.drift_monitor.last_result
+            self.drift_events.append(
+                {
+                    "position": position,
+                    "shift_count": result.n_drifted,
+                    "n_drifted": result.n_drifted,
+                    "drifted_features": [
+                        name
+                        for name, value in result.statistics.items()
+                        if value is not None
+                        and value > self.drift_monitor.psi_threshold
+                    ],
+                    "statistics": {
+                        name: value
+                        for name, value in result.statistics.items()
+                        if value is not None
+                    },
+                }
+            )
+        return drifted
+
+    def _refit_on_drift(self, position: int) -> None:
+        fit_rows = self._recent_stream_rows[-self.history :]
+        if len(fit_rows) < self.min_fit_rows:
+            self.skipped_refits += 1
+            return
+        features = list(self.drift_events[-1]["drifted_features"])
+        self._fit_model(fit_rows)
+        if self.n_refits > 0:
+            self.drift_refit_events.append(
+                {
+                    "position": position,
+                    "trigger": "drift",
+                    "rows_used": len(fit_rows),
+                    "drifted_features": features,
+                }
+            )
 
     def _maybe_promote(self, current_index: int | str | None = None) -> None:
         if self.policy != "quarantine":
@@ -253,6 +325,7 @@ class BaseBaseline:
         self.last_cap = None
         self.last_promotion_position = None
         self.drift_events = []
+        self.drift_refit_events = []
         self.promotion_events = []
         self._post_warmup_seen = 0
         self._refit_calls = 0
@@ -261,6 +334,7 @@ class BaseBaseline:
         self._step_count = 0
         self._n_features = None
         self._window_log = []
+        self._recent_stream_rows = []
         if self.drift_monitor is not None:
             self.drift_monitor.reset_reference(None)
 
@@ -301,7 +375,9 @@ class AdaptiveBaseline(BaseBaseline):
             self.buffer_indices.append(index)
             if self._step_count == self.warmup:
                 self._fit_model(self.buffer, initial=True)
-                self.drift_monitor.reset_reference(np.vstack(self.buffer))
+                self._recent_stream_rows = [
+                    row.copy() for row in self.buffer[-self.history :]
+                ]
             return np.nan, False
 
         if not self._fitted:
@@ -316,6 +392,11 @@ class AdaptiveBaseline(BaseBaseline):
             "flag": bool(flag),
             "stream_position": self._post_warmup_seen,
         })
+        self._recent_stream_rows.append(row.copy())
+        if len(self._recent_stream_rows) > self.history:
+            self._recent_stream_rows.pop(0)
+
+        drifted = self._observe_drift(row, self._step_count - 1)
 
         if self.policy == "quarantine":
             if flag:
@@ -328,38 +409,24 @@ class AdaptiveBaseline(BaseBaseline):
                 }
                 self.quarantine.append(entry)
                 self.n_quarantined += 1
-                self.drift_monitor.update(row, position=self._post_warmup_seen)
-                if self.drift_monitor.drifted:
-                    self.drift_events.append({
-                        "position": self._post_warmup_seen,
-                        "shift_count": self.drift_monitor.last_shift_count,
-                    })
             else:
                 self.buffer.append(row.copy())
                 self.buffer_indices.append(index)
-                self.drift_monitor.update(row, position=self._post_warmup_seen)
-                if self.drift_monitor.drifted:
-                    self.drift_events.append({
-                        "position": self._post_warmup_seen,
-                        "shift_count": self.drift_monitor.last_shift_count,
-                    })
             self._maybe_promote(current_index=index)
-            self._refit_if_needed()
+            if drifted and self.refit_trigger == "drift":
+                self._refit_on_drift(self._step_count - 1)
+            else:
+                self._refit_if_needed()
             return float(score), bool(flag)
 
         if not flag:
             self.buffer.append(row.copy())
             self.buffer_indices.append(index)
 
-        if (
-            self.refit_every is not None
-            and self._post_warmup_seen % self.refit_every == 0
-        ):
-            fit_rows = self.buffer[-self.history :]
-            if len(fit_rows) < self.min_fit_rows:
-                self.skipped_refits += 1
-            else:
-                self._fit_model(fit_rows)
+        if drifted and self.refit_trigger == "drift":
+            self._refit_on_drift(self._step_count - 1)
+        else:
+            self._refit_if_needed()
         return float(score), bool(flag)
 
 

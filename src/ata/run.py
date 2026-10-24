@@ -33,6 +33,14 @@ def _default_contamination() -> float:
         raise RuntimeError(f"Unable to read contamination from {DEFAULTS_PATH}: {exc}") from exc
 
 
+def _default_drift_options() -> dict:
+    try:
+        defaults = json.loads(DEFAULTS_PATH.read_text(encoding="utf-8"))
+        return defaults["drift"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Unable to read drift settings from {DEFAULTS_PATH}: {exc}") from exc
+
+
 def summarize_evaluation(y_true, y_pred):
     """Compute binary detection metrics; zero-denominator values are n/a."""
     y_true = [str(value).lower() for value in y_true]
@@ -72,6 +80,8 @@ def evaluate_csv(
     contamination: float | None = None,
     date_order: str = "auto",
     allow_any_dates: bool = False,
+    refit_trigger: str = "periodic",
+    drift_method: str | None = None,
 ):
     """Evaluate a detector against one CSV without changing or generating it."""
     path = Path(csv_path)
@@ -91,12 +101,21 @@ def evaluate_csv(
         )
     if contamination is None:
         contamination = _default_contamination()
+    drift_options = _default_drift_options()
     common = {
         "warmup": warmup,
         "history": history,
         "refit_every": refit_every,
         "contamination": contamination,
         "seed": model_seed,
+        "refit_trigger": refit_trigger,
+        "drift_method": drift_method or drift_options["method"],
+        "psi_threshold": drift_options["psi_threshold"],
+        "min_drift_features": drift_options["min_features"],
+        "drift_persistence": drift_options["persistence"],
+        "test_windows": drift_options["test_windows"],
+        "check_every": drift_options["check_every"],
+        "drift_cooldown": drift_options["cooldown"],
     }
     if baseline_name == "adaptive":
         model = AdaptiveBaseline(**common)
@@ -150,9 +169,11 @@ def _print_result(csv_path: Path, dataset: str, window: int, baseline: str, outp
     stats = output["load_stats"]
     metrics = output["metrics"]
     config = output["baseline_config"]
-    refit_seconds = (
+    periodic_refit = (
+        f"every {config['refit_every']} windows/"
         f"{config['refit_every'] * window}s"
-        if config["refit_every"] is not None
+        if config["refit_trigger"] == "periodic"
+        and config["refit_every"] is not None
         else "disabled"
     )
     print(f"dataset: {csv_path.name} ({dataset})")
@@ -160,8 +181,10 @@ def _print_result(csv_path: Path, dataset: str, window: int, baseline: str, outp
     print(
         f"baseline: {baseline} (warmup={config['warmup']} windows/"
         f"{config['warmup'] * window}s, history={config['history']} windows/"
-        f"{config['history'] * window}s, refit_every="
-        f"{config['refit_every']} windows/{refit_seconds}, "
+        f"{config['history'] * window}s, "
+        f"refit_trigger={config['refit_trigger']}, "
+        f"periodic_refit={periodic_refit}, "
+        f"drift_method={config['drift_method']}, "
         f"contamination={config['contamination']}, model_seed={config['seed']})"
     )
     print(f"total windows: {len(windows)}")
@@ -185,6 +208,17 @@ def _print_result(csv_path: Path, dataset: str, window: int, baseline: str, outp
     print(
         f"refits: {model.n_refits} skipped refits: {model.skipped_refits}"
     )
+    events = model.drift_events
+    first_event = events[0]["position"] if events else None
+    delay = None
+    sidecar = output["sidecar"]
+    if first_event is not None and sidecar and sidecar.get("drift_start") is not None:
+        drift_start_window = float(sidecar["drift_start"]) / window
+        delay = float(first_event) - drift_start_window
+    print(f"drift events: {len(events)}")
+    print(f"first drift event window: {first_event if first_event is not None else 'n/a'}")
+    print(f"detection delay (windows): {delay if delay is not None else 'n/a'}")
+    print(f"drift-triggered refits: {len(model.drift_refit_events)}")
 
 
 def main() -> None:
@@ -197,6 +231,8 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=120)
     parser.add_argument("--history", type=int, default=300)
     parser.add_argument("--refit-every", type=int, default=30)
+    parser.add_argument("--refit-trigger", choices=["periodic", "drift"], default="periodic")
+    parser.add_argument("--drift-method", choices=["psi", "ks"], default=None)
     parser.add_argument("--contamination", type=float, default=None)
     parser.add_argument("--baseline", choices=["adaptive", "static"], default="adaptive")
     parser.add_argument("--model-seed", type=int, default=0)
@@ -222,6 +258,8 @@ def main() -> None:
             contamination=args.contamination,
             date_order=args.date_order,
             allow_any_dates=args.allow_any_dates,
+            refit_trigger=args.refit_trigger,
+            drift_method=args.drift_method,
         )
     except InvalidCICHeaderError as exc:
         print(MANUAL_CIC_INSTRUCTIONS)

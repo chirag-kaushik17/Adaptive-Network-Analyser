@@ -1,10 +1,10 @@
 # Adaptive Network Traffic Analyzer
 
-ATA builds a flow-level anomaly detector in phases. The implemented scope in
-this repository is Phases 0–3R: the CIC/synthetic data layer, time-window
-features, and the unsupervised Layer 1 Isolation Forest baselines. Drift
-detection, a supervised classifier, explanations, and a serving API are not
-implemented in this phase.
+ATA builds a flow-level network traffic analyzer in phases. This repository
+contains the CIC/synthetic data layer, time-window features, unsupervised
+Layer 1 Isolation Forest baselines, PSI/KS drift detection, and supervised
+Layer 2 classifiers with SHAP explanations and JSON alert samples. A serving
+API is not implemented.
 
 ## Environment and tests
 
@@ -99,6 +99,16 @@ for a unit-strength drift. `--no-attacks` prevents attack and stealth flows.
 `--attack-order shuffled` deterministically shuffles each cycle for later
 classifier evaluation.
 
+Named deterministic scenarios are available with `--scenario stable`,
+`--scenario stable_attacks`, `--scenario drift`, and
+`--scenario drift_attacks`. The default remains the existing attack schedule
+without drift. `stable` contains normal traffic only; `stable_attacks` is the
+hard negative for false drift events; `drift` contains normal traffic with a
+gradual change after warm-up; and `drift_attacks` combines the change and
+attack schedule. A named scenario takes precedence over `--no-attacks` and
+`--drift`. The sidecar records drift start/end and is used only for evaluation
+delay, never as model input.
+
 Every duration parameter is in seconds unless its name explicitly says
 `windows`. Warm-up and history values are windows. Defaults assume a 1-second
 window. CIC commands use 60-second windows, so an equal number of windows
@@ -120,6 +130,16 @@ contamination value and the development-seed evidence are in
 `--baseline static`. Synthetic output is **not** evidence of real-world
 detection quality.
 
+Drift detection can be selected with `--drift-method psi|ks`; use
+`--refit-trigger drift` to refit after a persistent drift event instead of on
+the periodic interval. The default is `--refit-trigger periodic`, preserving
+Phase 3R behavior. The CLI reports drift event count, first event window,
+detection delay when sidecar metadata is available, and refit count. The
+monitor receives feature rows only. Drift-triggered refits use recent stream
+history, including flagged rows, so a rejected new regime can be learned; this
+differs intentionally from ordinary unflagged-buffer admission and can admit
+attack contamination.
+
 For a CIC TrafficLabelling file, use settings appropriate to 60-second
 windows, for example:
 
@@ -137,3 +157,43 @@ admission.
 Synthetic and real CIC results must always be reported separately. The
 synthetic generator is simplified and deterministic, and does not establish
 real-world performance.
+
+Compare static, periodic-adaptive, and drift-adaptive Layer 1 baselines on
+the fixed evaluation seeds and generate JSON/PNG reports with:
+
+```powershell
+python -m ata.evaluate --seeds 200 201 202 203 204 --out reports
+```
+
+The evaluation reports synthetic results only unless CIC data is separately
+provided. Its frozen GO/NO-GO verdict is a **research acceptance result**, not
+an engineering test gate; Phase 6 can be implemented and tested while the
+Layer 1 result remains NO-GO. Never represent a NO-GO as a PASS.
+
+## Layer 2 classifier and explainability
+
+Layer 2 compares a class-weighted XGBoost classifier with a class-weighted
+Random Forest. Hyperparameters and model choice are selected on development
+seeds 1–3 only and recorded under `classifier` in
+`configs/defaults.json`. The reported run uses seeds 200–204. For each seed,
+synthetic attack order is shuffled and five cycles ensure every target class
+appears on both sides of the chronological split. The first 65% of windows
+are training data, followed by a five-window gap and the test segment. The
+classifier input is exactly the 11 columns in `FEATURE_COLUMNS`; labels are
+targets only, and window indices are used only to preserve order.
+
+Run the classifier evaluation and generate reports:
+
+```powershell
+python -m ata.classify --seeds 200 201 202 203 204 --out reports
+```
+
+The CLI prints per-class precision, recall, F1, and support for both models,
+plus macro averages. It writes `reports/classifier_metrics.json`,
+`reports/confusion_matrix_xgboost.png`,
+`reports/confusion_matrix_random_forest.png`, `reports/shap_summary.png`, and
+`reports/alerts_sample.jsonl`. Each sample alert has exactly three
+class-specific SHAP features. The JSON report keeps Layer 1 research
+acceptance separate from Phase 6 engineering status. These are synthetic
+demonstration results, not evidence of real-world performance; CIC remains
+SKIPPED until TrafficLabelling data is provided.
