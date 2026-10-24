@@ -38,6 +38,7 @@ class BaseBaseline:
         test_windows: int = 60,
         check_every: int = 10,
         drift_cooldown: int = 30,
+        max_state_rows: int | None = None,
     ):
         if warmup < 2:
             raise ValueError("warmup must be at least 2 windows.")
@@ -59,6 +60,10 @@ class BaseBaseline:
             raise ValueError("min_flag_frac must lie in [0, 1].")
         if promotion_cooldown < 0:
             raise ValueError("promotion_cooldown cannot be negative.")
+        if max_state_rows is not None and max_state_rows < 1:
+            raise ValueError("max_state_rows must be positive or None.")
+        if max_state_rows is not None and max_state_rows < warmup:
+            raise ValueError("max_state_rows cannot be smaller than warmup.")
         if min_fit_rows is None:
             min_fit_rows = min(warmup, history)
         if min_fit_rows < 2:
@@ -77,6 +82,9 @@ class BaseBaseline:
         self.promote_after = int(promote_after)
         self.min_flag_frac = float(min_flag_frac)
         self.promotion_cooldown = int(promotion_cooldown)
+        self.max_state_rows = (
+            None if max_state_rows is None else int(max_state_rows)
+        )
         self.refit_trigger = refit_trigger
         self._default_drift_monitor = drift_monitor is None
         self.drift_monitor = drift_monitor if drift_monitor is not None else DriftMonitor(
@@ -166,6 +174,14 @@ class BaseBaseline:
         scaled = self.scaler.transform(row.reshape(1, -1))
         score = float(-self.forest.decision_function(scaled)[0])
         return score, score > 0
+
+    def _bound_state(self) -> None:
+        if self.max_state_rows is None:
+            return
+        del self.buffer[:-self.max_state_rows]
+        del self.buffer_indices[:-self.max_state_rows]
+        del self._window_log[:-self.max_state_rows]
+        del self.quarantine[:-self.max_state_rows]
 
     def _cap_for_span(self, scores: Sequence[float]) -> float:
         if not scores:
@@ -284,6 +300,7 @@ class BaseBaseline:
             return
         self.buffer.extend(np.asarray([item["row"] for item in promoted], dtype=float))
         self.buffer_indices.extend(item["original_index"] for item in promoted)
+        self._bound_state()
         self.last_cap = cap
         self.last_promotion_position = self._post_warmup_seen
         self.n_promotions += 1
@@ -412,6 +429,7 @@ class AdaptiveBaseline(BaseBaseline):
             else:
                 self.buffer.append(row.copy())
                 self.buffer_indices.append(index)
+            self._bound_state()
             self._maybe_promote(current_index=index)
             if drifted and self.refit_trigger == "drift":
                 self._refit_on_drift(self._step_count - 1)
@@ -422,6 +440,7 @@ class AdaptiveBaseline(BaseBaseline):
         if not flag:
             self.buffer.append(row.copy())
             self.buffer_indices.append(index)
+        self._bound_state()
 
         if drifted and self.refit_trigger == "drift":
             self._refit_on_drift(self._step_count - 1)

@@ -33,6 +33,8 @@ def _window_label(group: pd.DataFrame, min_attack_flows: int, min_attack_frac: f
     total = len(group)
     if total == 0:
         return "normal"
+    if "label" not in group.columns or group["label"].isna().all():
+        return "unknown"
     attack_mask = group["label"].astype(str).str.lower().ne("normal")
     attack_flows = int(attack_mask.sum())
     if attack_flows == 0:

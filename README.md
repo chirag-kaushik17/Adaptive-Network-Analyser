@@ -2,9 +2,11 @@
 
 ATA builds a flow-level network traffic analyzer in phases. This repository
 contains the CIC/synthetic data layer, time-window features, unsupervised
-Layer 1 Isolation Forest baselines, PSI/KS drift detection, and supervised
-Layer 2 classifiers with SHAP explanations and JSON alert samples. A serving
-API is not implemented.
+Layer 1 Isolation Forest baselines, PSI/KS drift detection, supervised Layer 2
+classifiers with SHAP explanations, a replayable streaming API, SQLite alert
+storage, and a local Streamlit dashboard. The frozen Phase 5 Layer 1 research
+result remains **FAIL / NO-GO**; this does not prevent the later engineering
+phases from running.
 
 ## Environment and tests
 
@@ -197,3 +199,64 @@ class-specific SHAP features. The JSON report keeps Layer 1 research
 acceptance separate from Phase 6 engineering status. These are synthetic
 demonstration results, not evidence of real-world performance; CIC remains
 SKIPPED until TrafficLabelling data is provided.
+
+## Streaming API and dashboard
+
+The streaming source reuses the existing flow loader and schema. It orders
+flows by timestamp, feeds them incrementally into the same window aggregator
+and Layer 1 baseline, and flushes the final partial window. Alerts are stored
+as JSON-backed records in SQLite; raw packet contents are not stored.
+
+Start the local API from PowerShell:
+
+```powershell
+python -m ata.serve --host 127.0.0.1 --port 8000 --database data/ata_alerts.sqlite3
+```
+
+The service exposes `GET /health`, `POST /flows`, `POST /score`,
+`POST /flush`, `GET /alerts`, `GET /alerts/{alert_id}`, and `GET /stats`.
+Replay an existing synthetic CSV into it from a second terminal:
+
+```powershell
+python -m ata.replay --csv data/synth.csv --dataset synth --url http://127.0.0.1:8000 --batch 2000 --speed 0
+```
+
+`--speed 0` replays as quickly as possible; a positive speed is a timing
+multiplier. The replay command finalizes the last incomplete window and writes
+`reports/phase7_replay_summary.json`. CIC CSVs can be replayed with
+`--dataset cicids2017` and the loader's date-order options.
+
+By default there is no saved Phase 6 model artifact, so the server emits
+explicit `unknown` classifications and no SHAP features for Layer 1 alerts.
+For an optional in-memory classifier demonstration, start the server with
+`--with-classifier`; this trains from development seed 1 and does not load or
+create a persistent model artifact.
+
+Run the Streamlit dashboard in another terminal:
+
+```powershell
+python -m streamlit run src/ata/dashboard.py
+```
+
+It connects to `http://127.0.0.1:8000` by default. Set `ATA_API_URL` to change
+the endpoint. The dashboard separates current API telemetry and alerts from
+the saved historical Phase 5/6 evaluation reports; a Phase 5 NO-GO remains
+visible and is not converted into an engineering status.
+
+Measure local throughput with:
+
+```powershell
+python -m ata.bench --csv data/synth.csv --dataset synth --batch 2000 --out reports/throughput.json
+```
+
+The benchmark reports aggregation, full-pipeline, and in-process FastAPI
+`TestClient` timings. The API timing excludes Uvicorn socket/process overhead;
+all such throughput values are local engineering measurements, not capacity
+guarantees or evidence of real-world detection performance.
+
+**Security and data limitations:** the API has no authentication or TLS and
+must stay bound to localhost; do not expose it to an untrusted network. The
+existing CSV loader materializes its input before replay, so replay is
+incremental after loading but is not a chunked large-file reader. Demonstration
+results are synthetic; real CIC validation is **SKIPPED** until
+TrafficLabelling CSVs are supplied.

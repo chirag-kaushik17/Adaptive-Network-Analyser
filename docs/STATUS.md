@@ -1,5 +1,26 @@
 # ATA phase status
 
+## Phase 7/8 starting audit (2026-10-24)
+
+- The workspace contains reusable flow loading (`ata.loader.load`), batch and
+  incremental window feature extraction (`window_features` and
+  `WindowAggregator`), Layer 1 `AdaptiveBaseline`/`StaticBaseline` scoring and
+  drift/adaptation counters, plus Phase 6 model construction, SHAP adaptation,
+  and JSON alert construction.
+- No streaming source/replay, unified online pipeline, alert database, FastAPI
+  app, server entry point, API benchmark, or dashboard existed at audit time.
+- Phase 6 currently trains models inside the evaluation CLI; it does not save
+  a deployable model artifact. `models/` is absent. The serving pipeline must
+  therefore make classifier use optional and must not claim a persisted model
+  was loaded.
+- Existing Phase 5/6 reports and plots are present under `reports/`. The
+  Phase 5 research verdict is **FAIL / NO-GO** and will remain separate from
+  Phase 7/8 engineering readiness.
+- The active interpreter is Python 3.14.6. FastAPI 0.141.1, Uvicorn 0.52.4,
+  HTTPX 0.28.1 and Pydantic 2.13.5 are installed; Streamlit is not installed.
+- Initial Phase 7/8 status: **NOT IMPLEMENTED**. No feature/schema or frozen
+  research criteria changes are needed for the planned serving work.
+
 ## Completed before Phase 3R
 
 - Phase 0 foundation: commit `d127e52`.
@@ -242,3 +263,81 @@ silently substituting an admitted-buffer-only experiment.
   (`python -m pytest -q`); only the same three upstream SHAP deprecation
   warnings were reported.
 - CIC TrafficLabelling remains **SKIPPED** because no real CIC data is present.
+
+## Phase 7 (streaming and serving; implemented)
+
+- Added `FlowStream`, which reuses `ata.loader.load`, yields chronologically
+  ordered canonical flows, supports speed-controlled replay and bounded
+  batches, and surfaces loader validation errors. The existing loader still
+  materializes the CSV before iteration; replay is incremental after loading,
+  not a chunked large-file reader.
+- Added `AtaPipeline` using the existing `WindowAggregator`, `AdaptiveBaseline`,
+  optional Phase 6 classifier/SHAP functions, and alert schema. It validates a
+  full batch before changing state, emits final partial windows on `flush()`,
+  makes repeated flushes safe, and exposes bounded telemetry/counters.
+- Added a FastAPI app factory and localhost service with health, flow ingestion,
+  read-only score, flush, alert list/detail, and stats endpoints. SQLite alert
+  storage uses parameterized SQL and JSON serialization; raw packet contents
+  are not stored. The API has no authentication or TLS and must remain local.
+- Added API replay and benchmark CLIs. The benchmark checks batch aggregation,
+  pipeline, and API window counts against the same loaded CSV.
+- Batch-versus-stream equivalence and API/store/replay/benchmark tests are in
+  `tests/test_phase7.py`: **9 passed**. The combined focused Phase 7/8 command
+  passed **14 tests**; it emitted two upstream Starlette deprecation warnings.
+- Synthetic end-to-end replay used one generated `stable_attacks` CSV,
+  seed 230, 29,908 flows and 190 windows. Replay processed all flows and
+  windows, persisted 21 alerts, and completed in **29.17 s** at
+  **1,025.4 flows/s** over local HTTP. No drift events or promotions occurred;
+  the baseline recorded two refits.
+- No trained model artifact is available. This run used Layer 1-only mode:
+  all 21 alerts explicitly used `predicted_class: unknown`, a null class
+  probability, and an empty SHAP feature list. This is an intentional
+  unavailable-classifier state, not a fabricated explanation.
+- `reports/phase7_replay_summary.json` and `reports/phase7_api_smoke.json`
+  record the replay and endpoint checks. Health, stats, alert-list, and alert
+  detail requests returned HTTP 200; the stored count and list total both equal
+  21.
+- `python -m ata.bench` measured aggregation at **87,485 flows/s**, the full
+  pipeline at **1,188.8 flows/s**, and in-process FastAPI `TestClient`
+  ingestion at **1,175.6 flows/s** on 29,908 synthetic flows. The API timing
+  excludes Uvicorn socket/process overhead. Machine and configuration details
+  are in `reports/throughput.json`; these are engineering timings, not
+  production capacity claims.
+
+## Phase 8 (interactive dashboard; implemented)
+
+- Added a Streamlit dashboard for API health/counters, recent traffic and
+  anomaly telemetry, alert filtering/detail/explanation, and the saved Phase 5
+  and Phase 6 reports and plots. It keeps live API observations separate from
+  historical evaluation data and displays the Layer 1 NO-GO.
+- Browser inspection verified the system overview, traffic/score charts, alert
+  explorer, a persisted Layer 1-only alert, and historical Phase 5/6 content.
+  The dashboard root and Streamlit health endpoint returned HTTP 200; the API
+  was healthy and reported 190 processed windows. Evidence is in
+  `reports/phase8_dashboard_smoke.json`.
+- The browser console emitted transient Vega "infinite extent" warnings while
+  charts rendered; the final visible telemetry charts contained finite data.
+  No blocking render failure was observed.
+- The API is unauthenticated and has no TLS. Keep it on localhost; exposing it
+  to an untrusted network is unsupported.
+- Real CIC TrafficLabelling validation remains **SKIPPED** because the data is
+  absent. All replay and throughput results above are synthetic and are not
+  evidence of real-world detection performance. The Phase 5 research result
+  remains **FAIL / NO-GO**, independent of Phase 7/8 engineering readiness.
+
+| Gate | Result | Evidence |
+| --- | --- | --- |
+| Phase 7 focused tests | PASS | 9 passed |
+| Phase 8 focused tests | PASS | Combined Phase 7/8 run: 14 passed |
+| Batch/stream window equivalence | PASS | 190 windows from the same replay input |
+| Synthetic API replay and SQLite persistence | PASS | 29,908 flows; 190 windows; 21 stored alerts |
+| API endpoint smoke checks | PASS | Health, stats, alerts, and detail returned HTTP 200 |
+| Throughput benchmark | PASS | Aggregation, pipeline, and in-process API counts agree |
+| Dashboard browser smoke check | PASS | Live telemetry, alert detail, historical report and NO-GO visible |
+| Layer 1 research acceptance | **FAIL / NO-GO** | Phase 5 recall criteria remain unmet |
+| CIC TrafficLabelling validation | SKIPPED | No CIC CSV files are present |
+| Final full regression suite | PASS | 86 passed in 119.61 seconds on Python 3.14.6 |
+
+- Final verification: `python -m pytest -q` completed once with **86 passed**
+  in **119.61 seconds**. Five upstream SHAP/Starlette/AnyIO deprecation
+  warnings were reported; no test failed.
