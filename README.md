@@ -207,6 +207,9 @@ flows by timestamp, feeds them incrementally into the same window aggregator
 and Layer 1 baseline, and flushes the final partial window. Alerts are stored
 as JSON-backed records in SQLite; raw packet contents are not stored.
 
+On Windows, run `run.bat` from the project folder to start the API and
+dashboard in separate terminal windows.
+
 Start the local API from PowerShell:
 
 ```powershell
