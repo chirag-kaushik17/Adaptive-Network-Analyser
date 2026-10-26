@@ -118,28 +118,29 @@ represents 60 times as much wall-clock traffic.
 
 ## Layer 1 evaluation
 
-Run the adaptive baseline against an existing synthetic CSV:
+Run the baseline against an existing synthetic CSV:
 
 ```powershell
 python -m ata.run --dataset synth --csv data/synth.csv
 ```
 
-The CLI only evaluates the CSV; it does not generate or edit it. It defaults
-to a 1-second window, 120 warm-up windows, 300 history windows, periodic
-refits every 30 post-warm-up windows, and model seed 0. The selected
-contamination value and the development-seed evidence are in
-`configs/defaults.json`. Compare with a static warm-up-only baseline using
-`--baseline static`. Synthetic output is **not** evidence of real-world
+The CLI defaults to a static baseline (fit once on clean warm-up, never refit).
+Adaptive periodic refitting and drift refitting are available as optional
+experiments via `--layer1-mode static|adaptive|drift` (or `--baseline static|adaptive`
+with `--refit-trigger periodic|drift`). Adaptive refit lowered recall during Phase 5
+evaluation, so static baseline is now the default. The CLI defaults to a 1-second
+window, 120 warm-up windows, 300 history windows, and model seed 0.
+The selected contamination value and the development-seed evidence are in
+`configs/defaults.json`. Synthetic output is **not** evidence of real-world
 detection quality.
 
 Drift detection can be selected with `--drift-method psi|ks`; use
-`--refit-trigger drift` to refit after a persistent drift event instead of on
-the periodic interval. The default is `--refit-trigger periodic`, preserving
-Phase 3R behavior. The CLI reports drift event count, first event window,
-detection delay when sidecar metadata is available, and refit count. The
-monitor receives feature rows only. Drift-triggered refits use recent stream
-history, including flagged rows, so a rejected new regime can be learned; this
-differs intentionally from ordinary unflagged-buffer admission and can admit
+`--layer1-mode drift` (or `--refit-trigger drift`) to refit after a persistent
+drift event instead of remaining static. The CLI reports drift event count,
+first event window, detection delay when sidecar metadata is available, and refit
+count. The monitor receives feature rows only. Drift-triggered refits use recent
+stream history, including flagged rows, so a rejected new regime can be learned;
+this differs intentionally from ordinary unflagged-buffer admission and can admit
 attack contamination.
 
 For a CIC TrafficLabelling file, use settings appropriate to 60-second
@@ -207,13 +208,29 @@ flows by timestamp, feeds them incrementally into the same window aggregator
 and Layer 1 baseline, and flushes the final partial window. Alerts are stored
 as JSON-backed records in SQLite; raw packet contents are not stored.
 
+By default, Layer 1 uses a static baseline (fit once on warm-up, never refit).
+Adaptive and drift modes remain available behind an explicit `--layer1-mode static|adaptive|drift`
+option on `serve.py`.
+
+After warm-up, Layer 2 evaluates the classifier on every window, rather than only on
+windows flagged by Layer 1:
+- An alert is raised whenever Layer 2 predicts any class other than `normal`.
+  The alert record captures `layer1_flagged` (true or false).
+- If Layer 1 flags a window that Layer 2 classifies as `normal`, an alert is
+  raised with `predicted_class="unknown_anomaly"` and null SHAP features (`top_features=[]`).
+- If no classifier is loaded, the pipeline behaves as before: it raises alerts
+  only when Layer 1 flags a window, with `predicted_class="unknown"`.
+
+Unused legacy quarantine/promotion mechanisms, the "Promotions" metric, and the
+always-empty "severity" column have been removed from the API stats and dashboard.
+
 On Windows, run `run.bat` from the project folder to start the API and
 dashboard in separate terminal windows.
 
 Start the local API from PowerShell:
 
 ```powershell
-python -m ata.serve --host 127.0.0.1 --port 8000 --database data/ata_alerts.sqlite3
+python -m ata.serve --host 127.0.0.1 --port 8000 --database data/ata_alerts.sqlite3 --layer1-mode static
 ```
 
 The service exposes `GET /health`, `POST /flows`, `POST /score`,

@@ -21,7 +21,7 @@ from .baseline import AdaptiveBaseline, StaticBaseline
 from .features import FEATURE_COLUMNS, window_features
 from .synth import generate_synthetic_csv
 from .run import DEFAULTS_PATH
-from tests.thresholds import (
+from .thresholds import (
     PHASE5_DRIFT_FAR_WINS_REQUIRED,
     PHASE5_DRIFT_RECALL_TOLERANCE,
     PHASE5_STABLE_FAR_TOLERANCE,

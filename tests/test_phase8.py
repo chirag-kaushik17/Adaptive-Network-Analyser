@@ -63,14 +63,23 @@ def test_alert_table_and_explanation_show_optional_fields_as_unavailable():
     }
     row = format_alert_row(alert)
     assert row["alert_id"] == "alert-1"
-    assert row["severity"] == "unavailable"
+    assert "severity" not in row
+    assert row["layer1_flagged"] == "unavailable"
     assert row["class_probability"] == "unavailable"
     assert row["top_features"] == "unavailable"
     assert "no classifier" in describe_alert(alert)
 
 
 def test_dashboard_loads_actual_historical_reports_without_changing_gate():
+    import pytest
     from ata.dashboard import ROOT
+
+    metrics_path = ROOT / "reports" / "metrics.json"
+    classifier_path = ROOT / "reports" / "classifier_metrics.json"
+    if not metrics_path.exists():
+        pytest.skip(f"reports/metrics.json not found at {metrics_path}")
+    if not classifier_path.exists():
+        pytest.skip(f"reports/classifier_metrics.json not found at {classifier_path}")
 
     snapshot = load_dashboard_data(
         "bad-url",

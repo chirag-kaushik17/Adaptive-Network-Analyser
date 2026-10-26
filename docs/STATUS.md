@@ -1,5 +1,54 @@
 # ATA phase status
 
+## Step 1 fixes
+
+1. **Drift monitor never fires in periodic mode.** `_fit_model` called
+   `drift_monitor.reset_reference()` on every fit, including periodic refits.
+   With `refit_every=30`, `cooldown=30`, and `test_windows=40` the monitor
+   could never accumulate enough rows to run a check. Fixed by only resetting
+   the monitor on the initial fit and on drift-triggered refits, not on
+   periodic refits. Added a regression test that runs the default periodic
+   configuration on a synthetic `drift` scenario and asserts at least one
+   drift event.
+
+2. **Production code imports from tests.** `evaluate.py` imported
+   `tests.thresholds`. Moved the thresholds file to `src/ata/thresholds.py`
+   and updated all imports in `src/`, `tests/`, and `scripts/`. The old
+   `tests/thresholds.py` re-exports from `ata.thresholds` for compatibility.
+   Nothing under `src/` imports from `tests/` any more.
+
+3. **Fragile dashboard test.** `test_phase8`'s test that loads real reports
+   now skips with a clear reason when `reports/metrics.json` or
+   `reports/classifier_metrics.json` does not exist.
+
+## Detection design simplification
+
+- **Static Layer 1 default:** Due to Phase 5 findings where periodic adaptive
+  refits degraded attack recall (resulting in the recorded Phase 5 NO-GO
+  verdict), `AtaPipeline`, the API config, `serve.py`, and the CLI (`run.py`)
+  now default to a static baseline (fit once on warm-up, never refit). Adaptive
+  and drift refit modes remain available as optional experiments behind explicit
+  CLI/config flags (`--layer1-mode static|adaptive|drift`).
+- **Phase 5 evaluate.py unchanged:** `evaluate.py` retains the ability to run
+  all three baseline modes (`static`, `adaptive_periodic`, `adaptive_drift`),
+  and the Phase 5 NO-GO verdict is kept strictly preserved.
+- **Layer 2 on every window:** After warm-up, the classifier runs on every
+  window, raising alerts for any non-normal prediction and recording whether
+  Layer 1 also flagged the window (`layer1_flagged`).
+- **Unknown anomaly alert rule:** When Layer 1 flags a window that Layer 2 calls
+  `"normal"`, an alert is generated with `predicted_class="unknown_anomaly"` and
+  null SHAP features (`top_features=[]`). `describe_alert` and the dashboard
+  display these alerts appropriately.
+- **No-classifier mode:** In the absence of a loaded Layer 2 model, the pipeline
+  continues to alert only when Layer 1 flags, with `predicted_class="unknown"`.
+- **Dead code removal:**
+  - Deleted quarantine and promotion policies (`policy`, `promote_after`,
+    `_maybe_promote`, quarantine state) from `baseline.py`.
+  - Deleted `LegacyShiftMonitor` from `drift.py`.
+  - Removed `"Promotions"` metric and `"severity"` column from API stats and
+    the dashboard.
+  - Removed duplicate flow batch validation from the API's `/flows` endpoint.
+
 ## Phase 7/8 starting audit (2026-10-24)
 
 - The workspace contains reusable flow loading (`ata.loader.load`), batch and

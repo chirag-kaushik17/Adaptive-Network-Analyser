@@ -13,7 +13,7 @@ from ata.features import FEATURE_COLUMNS, window_features
 from ata.machine import core_count, cpu_model
 from ata.run import summarize_evaluation
 from ata.synth import generate_synthetic_data
-from tests.thresholds import (
+from ata.thresholds import (
     ATTACK_MEAN_FALSE_ALARM_MAX,
     ATTACK_MEAN_RECALL_MIN,
     NORMAL_MEAN_FALSE_ALARM_MAX,

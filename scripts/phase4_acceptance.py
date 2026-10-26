@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-import sys
+
+
 
 from ata.run import evaluate_csv
 from ata.synth import generate_synthetic_csv
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tests"))
-from thresholds import (
+from ata.thresholds import (
     PHASE4_DRIFT_EVENTS_MIN,
     PHASE4_FIRST_EVENT_AFTER_START,
     PHASE4_STABLE_DRIFT_EVENTS_MAX,

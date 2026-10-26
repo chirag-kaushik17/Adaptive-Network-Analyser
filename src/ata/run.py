@@ -75,7 +75,8 @@ def evaluate_csv(
     warmup: int = 120,
     history: int = 300,
     refit_every: int | None = 30,
-    baseline_name: str = "adaptive",
+    baseline_name: str | None = None,
+    layer1_mode: str | None = None,
     model_seed: int = 0,
     contamination: float | None = None,
     date_order: str = "auto",
@@ -84,6 +85,22 @@ def evaluate_csv(
     drift_method: str | None = None,
 ):
     """Evaluate a detector against one CSV without changing or generating it."""
+    if layer1_mode is not None:
+        if layer1_mode == "static":
+            resolved_baseline = "static"
+        elif layer1_mode == "adaptive":
+            resolved_baseline = "adaptive"
+            refit_trigger = "periodic"
+        elif layer1_mode == "drift":
+            resolved_baseline = "adaptive"
+            refit_trigger = "drift"
+        else:
+            raise ValueError(f"Unsupported layer1_mode: {layer1_mode!r}")
+    elif baseline_name is not None:
+        resolved_baseline = baseline_name
+    else:
+        resolved_baseline = "static"
+
     path = Path(csv_path)
     flows, load_stats = load(
         path,
@@ -117,12 +134,12 @@ def evaluate_csv(
         "check_every": drift_options["check_every"],
         "drift_cooldown": drift_options["cooldown"],
     }
-    if baseline_name == "adaptive":
+    if resolved_baseline == "adaptive":
         model = AdaptiveBaseline(**common)
-    elif baseline_name == "static":
+    elif resolved_baseline == "static":
         model = StaticBaseline(**common)
     else:
-        raise ValueError(f"Unsupported baseline: {baseline_name!r}")
+        raise ValueError(f"Unsupported baseline: {resolved_baseline!r}")
 
     results = model.run(windows[FEATURE_COLUMNS])
     post = results.iloc[warmup:]
@@ -234,7 +251,18 @@ def main() -> None:
     parser.add_argument("--refit-trigger", choices=["periodic", "drift"], default="periodic")
     parser.add_argument("--drift-method", choices=["psi", "ks"], default=None)
     parser.add_argument("--contamination", type=float, default=None)
-    parser.add_argument("--baseline", choices=["adaptive", "static"], default="adaptive")
+    parser.add_argument(
+        "--layer1-mode",
+        choices=["static", "adaptive", "drift"],
+        default=None,
+        help="Layer 1 baseline mode (default: static)",
+    )
+    parser.add_argument(
+        "--baseline",
+        choices=["adaptive", "static"],
+        default=None,
+        help="Legacy baseline option",
+    )
     parser.add_argument("--model-seed", type=int, default=0)
     parser.add_argument("--date-order", choices=["auto", "dmy", "mdy"], default="auto")
     parser.add_argument("--allow-any-dates", action="store_true")
@@ -245,6 +273,18 @@ def main() -> None:
         print(MANUAL_CIC_INSTRUCTIONS)
         print("CHECK: SKIPPED (CIC CSV is missing).")
         return
+
+    if args.layer1_mode is not None:
+        mode = args.layer1_mode
+    elif args.baseline is not None:
+        mode = args.baseline
+    else:
+        mode = "static"
+
+    refit_trigger = args.refit_trigger
+    if mode == "drift":
+        refit_trigger = "drift"
+
     try:
         output = evaluate_csv(
             csv_path,
@@ -253,12 +293,12 @@ def main() -> None:
             warmup=args.warmup,
             history=args.history,
             refit_every=args.refit_every,
-            baseline_name=args.baseline,
+            layer1_mode=mode,
             model_seed=args.model_seed,
             contamination=args.contamination,
             date_order=args.date_order,
             allow_any_dates=args.allow_any_dates,
-            refit_trigger=args.refit_trigger,
+            refit_trigger=refit_trigger,
             drift_method=args.drift_method,
         )
     except InvalidCICHeaderError as exc:
@@ -268,7 +308,7 @@ def main() -> None:
     except Exception as exc:
         print(f"CHECK: FAILED ({type(exc).__name__}: {exc})", file=sys.stderr)
         raise SystemExit(1) from exc
-    _print_result(csv_path, args.dataset, args.window, args.baseline, output)
+    _print_result(csv_path, args.dataset, args.window, mode, output)
     print("CHECK: PASSED")
 
 

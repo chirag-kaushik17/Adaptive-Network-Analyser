@@ -24,11 +24,6 @@ class BaseBaseline:
         contamination: float,
         seed: int = 0,
         min_fit_rows: int | None = None,
-        policy: str = "strict",
-        severity_beta: float = 1.5,
-        promote_after: int = 46,
-        min_flag_frac: float = 0.30,
-        promotion_cooldown: int = 30,
         drift_monitor: DriftMonitor | None = None,
         refit_trigger: str = "periodic",
         drift_method: str = "psi",
@@ -48,18 +43,8 @@ class BaseBaseline:
             raise ValueError("refit_every must be at least 1 or None.")
         if not 0 < contamination < 0.5:
             raise ValueError("contamination must be strictly between 0 and 0.5.")
-        if policy not in {"strict", "quarantine"}:
-            raise ValueError("policy must be 'strict' or 'quarantine'.")
         if refit_trigger not in {"periodic", "drift"}:
             raise ValueError("refit_trigger must be 'periodic' or 'drift'.")
-        if severity_beta <= 0:
-            raise ValueError("severity_beta must be greater than zero.")
-        if promote_after <= 0:
-            raise ValueError("promote_after must be positive.")
-        if not 0 <= min_flag_frac <= 1:
-            raise ValueError("min_flag_frac must lie in [0, 1].")
-        if promotion_cooldown < 0:
-            raise ValueError("promotion_cooldown cannot be negative.")
         if max_state_rows is not None and max_state_rows < 1:
             raise ValueError("max_state_rows must be positive or None.")
         if max_state_rows is not None and max_state_rows < warmup:
@@ -77,11 +62,6 @@ class BaseBaseline:
         self.contamination = float(contamination)
         self.seed = int(seed)
         self.min_fit_rows = int(min_fit_rows)
-        self.policy = policy
-        self.severity_beta = float(severity_beta)
-        self.promote_after = int(promote_after)
-        self.min_flag_frac = float(min_flag_frac)
-        self.promotion_cooldown = int(promotion_cooldown)
         self.max_state_rows = (
             None if max_state_rows is None else int(max_state_rows)
         )
@@ -102,16 +82,8 @@ class BaseBaseline:
         )
         self.buffer: list[np.ndarray] = []
         self.buffer_indices: list[int | str] = []
-        self.quarantine: list[dict] = []
-        self.n_quarantined = 0
-        self.n_promotions = 0
-        self.n_dropped_severe = 0
-        self.degenerate_cap = 0
-        self.last_cap: float | None = None
-        self.last_promotion_position: int | None = None
         self.drift_events: list[dict] = []
         self.drift_refit_events: list[dict] = []
-        self.promotion_events: list[dict] = []
         self._post_warmup_seen = 0
         self._refit_calls = 0
         self.skipped_refits = 0
@@ -142,7 +114,7 @@ class BaseBaseline:
             )
         return array.astype(float, copy=False)
 
-    def _fit_model(self, rows: Sequence[np.ndarray], *, initial: bool = False) -> None:
+    def _fit_model(self, rows: Sequence[np.ndarray], *, initial: bool = False, drift_triggered: bool = False) -> None:
         required_rows = self.warmup if initial else self.min_fit_rows
         if len(rows) < required_rows:
             if initial:
@@ -166,7 +138,8 @@ class BaseBaseline:
         self._fitted = True
         if not initial:
             self._refit_calls += 1
-        self.drift_monitor.reset_reference(matrix)
+        if initial or drift_triggered:
+            self.drift_monitor.reset_reference(matrix)
 
     def _score_flag(self, row: np.ndarray) -> tuple[float, bool]:
         if not self._fitted:
@@ -181,17 +154,6 @@ class BaseBaseline:
         del self.buffer[:-self.max_state_rows]
         del self.buffer_indices[:-self.max_state_rows]
         del self._window_log[:-self.max_state_rows]
-        del self.quarantine[:-self.max_state_rows]
-
-    def _cap_for_span(self, scores: Sequence[float]) -> float:
-        if not scores:
-            return 0.0
-        median_score = float(np.median(np.asarray(scores, dtype=float)))
-        if not np.isfinite(median_score) or median_score >= 0 or abs(median_score) < 1e-3:
-            self.degenerate_cap += 1
-            return 0.0
-        cap = float(median_score * (1.0 - self.severity_beta))
-        return cap
 
     def _refit_if_needed(self, *, force: bool = False) -> None:
         if self.refit_trigger == "drift":
@@ -236,7 +198,7 @@ class BaseBaseline:
             self.skipped_refits += 1
             return
         features = list(self.drift_events[-1]["drifted_features"])
-        self._fit_model(fit_rows)
+        self._fit_model(fit_rows, drift_triggered=True)
         if self.n_refits > 0:
             self.drift_refit_events.append(
                 {
@@ -246,81 +208,6 @@ class BaseBaseline:
                     "drifted_features": features,
                 }
             )
-
-    def _maybe_promote(self, current_index: int | str | None = None) -> None:
-        if self.policy != "quarantine":
-            return
-        if len(self._window_log) < self.promote_after:
-            return
-        if self.last_promotion_position is not None and (
-            self._post_warmup_seen - self.last_promotion_position < self.promotion_cooldown
-        ):
-            return
-        span = self._window_log[-self.promote_after :]
-        if len(span) != self.promote_after:
-            return
-        scores = [float(item["score"]) for item in span]
-        flagged = [bool(item["flag"]) for item in span]
-        if not any(flagged):
-            return
-        flagged_frac = sum(flagged) / len(span)
-        if flagged_frac < self.min_flag_frac:
-            return
-        cap = self._cap_for_span(scores)
-        if cap == 0.0 and np.median(scores) >= 0:
-            return
-        flagged_window_scores = [float(item["score"]) for item in span if item["flag"]]
-        if not flagged_window_scores:
-            return
-        mild_ratio = sum(1 for score in flagged_window_scores if 0.0 < score <= cap) / len(flagged_window_scores)
-        if mild_ratio < 0.9:
-            return
-        median_score = float(np.median(scores))
-        if median_score > cap:
-            return
-
-        if self.drift_monitor is not None:
-            first_half = [item["row"] for item in span[: len(span) // 2]]
-            second_half = [item["row"] for item in span[len(span) // 2 :]]
-            if first_half and second_half:
-                shift_count = n_shifted_features(
-                    np.vstack(first_half),
-                    np.vstack(second_half),
-                    self.drift_monitor.reference if self.drift_monitor.reference is not None else np.vstack(first_half + second_half),
-                )
-                if shift_count >= self.drift_monitor.min_features:
-                    return
-
-        quarantined = [item for item in self.quarantine if item["stream_position"] >= self._post_warmup_seen - self.promote_after + 1]
-        if not quarantined:
-            return
-        promoted = [item for item in quarantined if item["flag"] and 0.0 < item["score"] <= cap]
-        dropped = [item for item in quarantined if item["flag"] and item["score"] > cap]
-        if not promoted:
-            return
-        self.buffer.extend(np.asarray([item["row"] for item in promoted], dtype=float))
-        self.buffer_indices.extend(item["original_index"] for item in promoted)
-        self._bound_state()
-        self.last_cap = cap
-        self.last_promotion_position = self._post_warmup_seen
-        self.n_promotions += 1
-        self.n_dropped_severe += len(dropped)
-        self.quarantine.clear()
-        self.n_quarantined = 0
-        self.drift_monitor.reset_reference(np.vstack(self.buffer[-self.history :]))
-        self.promotion_events.append(
-            {
-                "position": self._post_warmup_seen,
-                "cap": cap,
-                "span_length": self.promote_after,
-                "flagged_fraction": flagged_frac,
-                "mild_ratio": mild_ratio,
-                "promoted_count": len(promoted),
-                "dropped_severe": len(dropped),
-                "new_regime_fraction": len(promoted) / max(1, len(self.buffer[-self.history :])),
-            }
-        )
-        self._refit_if_needed(force=True)
 
     def score_only(self, x) -> tuple[float, bool]:
         """Score a feature vector without changing any baseline state."""
@@ -334,16 +221,8 @@ class BaseBaseline:
         )
         self.buffer = []
         self.buffer_indices = []
-        self.quarantine = []
-        self.n_quarantined = 0
-        self.n_promotions = 0
-        self.n_dropped_severe = 0
-        self.degenerate_cap = 0
-        self.last_cap = None
-        self.last_promotion_position = None
         self.drift_events = []
         self.drift_refit_events = []
-        self.promotion_events = []
         self._post_warmup_seen = 0
         self._refit_calls = 0
         self.skipped_refits = 0
@@ -414,28 +293,6 @@ class AdaptiveBaseline(BaseBaseline):
             self._recent_stream_rows.pop(0)
 
         drifted = self._observe_drift(row, self._step_count - 1)
-
-        if self.policy == "quarantine":
-            if flag:
-                entry = {
-                    "stream_position": self._post_warmup_seen,
-                    "original_index": index,
-                    "row": row.copy(),
-                    "score": float(score),
-                    "flag": True,
-                }
-                self.quarantine.append(entry)
-                self.n_quarantined += 1
-            else:
-                self.buffer.append(row.copy())
-                self.buffer_indices.append(index)
-            self._bound_state()
-            self._maybe_promote(current_index=index)
-            if drifted and self.refit_trigger == "drift":
-                self._refit_on_drift(self._step_count - 1)
-            else:
-                self._refit_if_needed()
-            return float(score), bool(flag)
 
         if not flag:
             self.buffer.append(row.copy())

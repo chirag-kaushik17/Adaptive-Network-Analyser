@@ -202,3 +202,29 @@ def test_periodic_smoke_seed_matches_phase3r_metric_fingerprint():
     )
     assert (metrics["tp"], metrics["fp"], metrics["fn"]) == (269, 3, 1)
     assert model.n_refits == 26
+
+
+def test_periodic_mode_drift_monitor_fires_on_drift_scenario():
+    """Drift monitor must fire in periodic mode on a synthetic drift scenario.
+
+    Before the fix, _fit_model reset the drift monitor (reference and cooldown)
+    on every refit including periodic refits.  With refit_every=30, cooldown=30,
+    and test_windows=40 the monitor could never accumulate enough rows to run a
+    check.  This test verifies the fix by running the default periodic
+    configuration on a 'drift' scenario and asserting at least one drift event.
+    """
+    flows = generate_synthetic_data(seed=100, scenario="drift")
+    windows = window_features(flows, window=1)
+    model = AdaptiveBaseline(
+        warmup=120,
+        history=300,
+        refit_every=30,
+        contamination=0.005,
+        seed=0,
+        refit_trigger="periodic",
+    )
+    model.run(windows[FEATURE_COLUMNS])
+    assert len(model.drift_events) >= 1, (
+        f"Expected at least 1 drift event in periodic mode on a drift scenario, "
+        f"got {len(model.drift_events)}"
+    )

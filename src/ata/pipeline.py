@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from .alerts import build_alert_record
-from .baseline import AdaptiveBaseline
+from .baseline import AdaptiveBaseline, StaticBaseline
 from .classifier import CLASS_NAMES, build_model, fit_model, make_dataset
 from .explain import shap_for_predicted_class, top_features
 from .features import FEATURE_COLUMNS, WindowAggregator
@@ -127,6 +127,7 @@ class AtaPipeline:
         model_name: str | None = None,
         telemetry_limit: int = 2000,
         adaptation_policy: str = "strict",
+        layer1_mode: str = "static",
     ):
         defaults = self._defaults()
         drift_config = dict(drift or defaults["drift"])
@@ -136,23 +137,54 @@ class AtaPipeline:
         self.refit_every = refit_every
         self.contamination = float(contamination)
         self.model_seed = int(model_seed)
-        self.baseline = AdaptiveBaseline(
-            warmup=self.warmup,
-            history=self.history,
-            refit_every=self.refit_every,
-            contamination=self.contamination,
-            seed=self.model_seed,
-            policy=adaptation_policy,
-            refit_trigger=refit_trigger,
-            drift_method=drift_config["method"],
-            psi_threshold=drift_config["psi_threshold"],
-            min_drift_features=drift_config["min_features"],
-            drift_persistence=drift_config["persistence"],
-            test_windows=drift_config["test_windows"],
-            check_every=drift_config["check_every"],
-            drift_cooldown=drift_config["cooldown"],
-            max_state_rows=max(telemetry_limit, int(defaults.get("promote_after", 46))),
-        )
+        self.layer1_mode = str(layer1_mode)
+        if self.layer1_mode == "static":
+            self.baseline = StaticBaseline(
+                warmup=self.warmup,
+                history=self.history,
+                refit_every=None,
+                contamination=self.contamination,
+                seed=self.model_seed,
+                max_state_rows=telemetry_limit,
+            )
+        elif self.layer1_mode == "adaptive":
+            self.baseline = AdaptiveBaseline(
+                warmup=self.warmup,
+                history=self.history,
+                refit_every=self.refit_every,
+                contamination=self.contamination,
+                seed=self.model_seed,
+                refit_trigger="periodic",
+                drift_method=drift_config["method"],
+                psi_threshold=drift_config["psi_threshold"],
+                min_drift_features=drift_config["min_features"],
+                drift_persistence=drift_config["persistence"],
+                test_windows=drift_config["test_windows"],
+                check_every=drift_config["check_every"],
+                drift_cooldown=drift_config["cooldown"],
+                max_state_rows=telemetry_limit,
+            )
+        elif self.layer1_mode == "drift":
+            self.baseline = AdaptiveBaseline(
+                warmup=self.warmup,
+                history=self.history,
+                refit_every=self.refit_every,
+                contamination=self.contamination,
+                seed=self.model_seed,
+                refit_trigger="drift",
+                drift_method=drift_config["method"],
+                psi_threshold=drift_config["psi_threshold"],
+                min_drift_features=drift_config["min_features"],
+                drift_persistence=drift_config["persistence"],
+                test_windows=drift_config["test_windows"],
+                check_every=drift_config["check_every"],
+                drift_cooldown=drift_config["cooldown"],
+                max_state_rows=telemetry_limit,
+            )
+        else:
+            raise ValueError(
+                f"layer1_mode must be 'static', 'adaptive', or 'drift'; received {layer1_mode!r}."
+            )
         self.aggregator = WindowAggregator(window=self.window)
         self.classifier = classifier
         self.explainer = explainer
@@ -229,11 +261,12 @@ class AtaPipeline:
             drift_events = self.baseline.drift_events
             newly_observed = drift_events[self._observed_drift_events :]
             self._observed_drift_events = len(drift_events)
+            is_warmup = not math.isfinite(float(score))
             telemetry = {
                 "window_index": index,
                 "event_timestamp": float(index * self.window),
                 "flow_count": int(item["flows"]),
-                "score": None if not math.isfinite(float(score)) else float(score),
+                "score": None if is_warmup else float(score),
                 "flagged": bool(flagged),
                 "predicted_class": None,
                 "drift_event": bool(newly_observed),
@@ -242,26 +275,74 @@ class AtaPipeline:
                 },
             }
             self._telemetry.append(telemetry)
-            if flagged:
-                prediction = self._classify(feature_vector)
+            if not is_warmup:
                 drift_metadata = newly_observed[-1] if newly_observed else None
-                alert = build_alert_record(
-                    alert_id=f"ata-{uuid.uuid4().hex}",
-                    window_index=index,
-                    layer1_score=float(score),
-                    predicted_class=prediction["predicted_class"],
-                    class_probability=prediction["class_probability"],
-                    top_features=prediction["top_features"],
-                    model_name=prediction["model_name"],
-                    model_version=prediction["model_version"],
-                )
-                alert.update(
-                    event_timestamp=float(index * self.window),
-                    drift_metadata=drift_metadata,
-                )
-                self.alerts_generated += 1
-                telemetry["predicted_class"] = prediction["predicted_class"]
-                alerts.append(alert)
+                if self.classifier is None:
+                    if flagged:
+                        prediction = self._classify(feature_vector)
+                        alert = build_alert_record(
+                            alert_id=f"ata-{uuid.uuid4().hex}",
+                            window_index=index,
+                            layer1_score=float(score),
+                            predicted_class="unknown",
+                            class_probability=None,
+                            top_features=[],
+                            model_name="unavailable",
+                            model_version=None,
+                            layer1_flagged=True,
+                        )
+                        alert.update(
+                            event_timestamp=float(index * self.window),
+                            drift_metadata=drift_metadata,
+                            layer1_flagged=True,
+                        )
+                        self.alerts_generated += 1
+                        telemetry["predicted_class"] = "unknown"
+                        alerts.append(alert)
+                else:
+                    prediction = self._classify(feature_vector)
+                    predicted_class = prediction["predicted_class"]
+                    telemetry["predicted_class"] = predicted_class
+
+                    if predicted_class != "normal":
+                        alert = build_alert_record(
+                            alert_id=f"ata-{uuid.uuid4().hex}",
+                            window_index=index,
+                            layer1_score=float(score),
+                            predicted_class=predicted_class,
+                            class_probability=prediction["class_probability"],
+                            top_features=prediction["top_features"],
+                            model_name=prediction["model_name"],
+                            model_version=prediction["model_version"],
+                            layer1_flagged=bool(flagged),
+                        )
+                        alert.update(
+                            event_timestamp=float(index * self.window),
+                            drift_metadata=drift_metadata,
+                            layer1_flagged=bool(flagged),
+                        )
+                        self.alerts_generated += 1
+                        alerts.append(alert)
+                    elif flagged:
+                        alert = build_alert_record(
+                            alert_id=f"ata-{uuid.uuid4().hex}",
+                            window_index=index,
+                            layer1_score=float(score),
+                            predicted_class="unknown_anomaly",
+                            class_probability=None,
+                            top_features=[],
+                            model_name=prediction["model_name"],
+                            model_version=prediction["model_version"],
+                            layer1_flagged=True,
+                        )
+                        alert.update(
+                            event_timestamp=float(index * self.window),
+                            drift_metadata=drift_metadata,
+                            layer1_flagged=True,
+                        )
+                        self.alerts_generated += 1
+                        telemetry["predicted_class"] = "unknown_anomaly"
+                        alerts.append(alert)
         return alerts
 
     def _classify(self, feature_vector: np.ndarray) -> dict[str, Any]:
@@ -310,13 +391,18 @@ class AtaPipeline:
         if vector.shape != (len(FEATURE_COLUMNS),) or not np.isfinite(vector).all():
             raise ValueError("Feature vector must contain finite numeric values.")
         score, flagged = self.baseline.score_only(vector)
-        prediction = self._classify(vector) if flagged else {
-            "predicted_class": "normal",
-            "class_probability": None,
-            "top_features": [],
-            "model_name": self.model_name or "unavailable",
-            "model_version": self.model_version,
-        }
+        if self.classifier is not None:
+            prediction = self._classify(vector)
+        elif flagged:
+            prediction = self._classify(vector)
+        else:
+            prediction = {
+                "predicted_class": "normal",
+                "class_probability": None,
+                "top_features": [],
+                "model_name": self.model_name or "unavailable",
+                "model_version": self.model_version,
+            }
         return {
             "score": float(score),
             "flagged": bool(flagged),
@@ -332,7 +418,6 @@ class AtaPipeline:
             "alerts_generated": self.alerts_generated,
             "drift_events": len(self.baseline.drift_events),
             "refits": self.baseline.n_refits,
-            "promotions": self.baseline.n_promotions,
             "skipped_refits": self.baseline.skipped_refits,
             "warmup_complete": self.ready,
             "classifier_loaded": self.classifier is not None,

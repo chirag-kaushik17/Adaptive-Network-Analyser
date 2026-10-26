@@ -19,6 +19,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--database", default="data/ata_alerts.sqlite3")
     parser.add_argument("--with-classifier", action="store_true")
+    parser.add_argument(
+        "--layer1-mode",
+        choices=["static", "adaptive", "drift"],
+        default="static",
+        help="Layer 1 baseline mode (default: static)",
+    )
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535.")
@@ -27,6 +33,7 @@ def main() -> None:
         defaults = json.loads(DEFAULTS_PATH.read_text(encoding="utf-8"))
         config = {
             "database": args.database,
+            "layer1_mode": args.layer1_mode,
             "warmup": defaults["warmup_windows"],
             "history": defaults["history_windows"],
             "refit_every": defaults["refit_every_windows"],

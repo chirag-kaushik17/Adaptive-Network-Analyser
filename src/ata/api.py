@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .features import FEATURE_COLUMNS
-from .pipeline import AtaPipeline, validate_flow_batch
+from .pipeline import AtaPipeline
 from .store import AlertStore
 
 Protocol = Literal["tcp", "udp", "icmp", "other"]
@@ -89,7 +89,7 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
         explainer=options.get("explainer"),
         model_name=options.get("model_name"),
         telemetry_limit=int(options.get("telemetry_limit", 2000)),
-        adaptation_policy=str(options.get("adaptation_policy", "strict")),
+        layer1_mode=str(options.get("layer1_mode", "static")),
     )
     database = options.get("database", "data/ata_alerts.sqlite3")
     store = options.get("store") or AlertStore(database)
@@ -154,26 +154,21 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
             )
         candidate_flows = [flow.model_dump(exclude_none=True) for flow in request.flows]
         with state_lock:
-            try:
-                checked = validate_flow_batch(
-                    candidate_flows,
-                    previous_ts=pipeline.last_flow_ts,
-                )
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail={"error": "invalid_flow_order_or_value", "message": str(exc)},
-                ) from exc
             before_windows = pipeline.windows_processed
             before_alerts = pipeline.alerts_generated
             try:
-                alerts = pipeline.process_flows(checked)
+                alerts = pipeline.process_flows(candidate_flows)
                 for alert in alerts:
                     store.add(alert)
             except ValueError as exc:
+                if str(exc) == "Pipeline is closed after flush.":
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"error": "flow_processing_failed", "message": str(exc)},
+                    ) from exc
                 raise HTTPException(
-                    status_code=422,
-                    detail={"error": "flow_processing_failed", "message": str(exc)},
+                    status_code=409,
+                    detail={"error": "invalid_flow_order_or_value", "message": str(exc)},
                 ) from exc
             except Exception as exc:
                 raise HTTPException(
@@ -181,7 +176,7 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
                     detail={"error": "pipeline_or_storage_unavailable"},
                 ) from exc
             return {
-                "flows_accepted": len(checked),
+                "flows_accepted": len(candidate_flows),
                 "windows_processed": pipeline.windows_processed - before_windows,
                 "total_windows_processed": pipeline.windows_processed,
                 "alerts_generated": pipeline.alerts_generated - before_alerts,

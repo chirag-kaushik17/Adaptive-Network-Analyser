@@ -70,7 +70,7 @@ def format_alert_row(alert: dict[str, Any]) -> dict[str, Any]:
         "event_timestamp_seconds": alert.get("event_timestamp", "unavailable"),
         "window_index": alert.get("window_index", "unavailable"),
         "predicted_attack_type": alert.get("predicted_class", "unavailable"),
-        "severity": alert.get("severity", "unavailable"),
+        "layer1_flagged": alert.get("layer1_flagged", "unavailable"),
         "anomaly_score": alert.get("layer1_score", "unavailable"),
         "class_probability": alert.get("class_probability", "unavailable"),
         "top_features": feature_text,
@@ -149,11 +149,11 @@ def _render_live(snapshot: dict[str, Any], api_url: str) -> None:
     if stats is None:
         st.info(f"Operational counters unavailable: {snapshot['stats_error']}")
         return
-    columns = st.columns(5)
+    columns = st.columns(4)
     for column, label, key in zip(
         columns,
-        ("Windows processed", "Alerts stored", "Drift events", "Refits", "Promotions"),
-        ("windows_processed", "stored_alerts", "drift_events", "refits", "promotions"),
+        ("Windows processed", "Alerts stored", "Drift events", "Refits"),
+        ("windows_processed", "stored_alerts", "drift_events", "refits"),
     ):
         column.metric(label, _metric(stats.get(key)))
 
@@ -257,6 +257,7 @@ def _render_alerts(snapshot: dict[str, Any], api_url: str) -> None:
             "alert_id": detail.get("alert_id", "unavailable"),
             "window_index": detail.get("window_index", "unavailable"),
             "event_timestamp": detail.get("event_timestamp", "unavailable"),
+            "layer1_flagged": detail.get("layer1_flagged", "unavailable"),
             "drift_metadata": detail.get("drift_metadata", "unavailable"),
             "top_features": detail.get("top_features", "unavailable"),
         }

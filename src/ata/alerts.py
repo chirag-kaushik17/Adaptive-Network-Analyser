@@ -24,24 +24,34 @@ def build_alert_record(
     layer1_score: float | None,
     predicted_class: str,
     class_probability: float | None,
-    top_features: list[dict],
+    top_features: list[dict] | None = None,
     model_name: str,
     model_version: str | None,
+    layer1_flagged: bool | None = None,
 ) -> dict[str, Any]:
     classified = model_name != "unavailable"
-    if classified and len(top_features) != 3:
-        raise ValueError("An alert must contain exactly three top features.")
-    if not classified and top_features:
+    feature_list = [] if top_features is None else top_features
+    if predicted_class == "unknown_anomaly":
+        if feature_list:
+            raise ValueError("unknown_anomaly alerts cannot contain SHAP feature values.")
+    elif classified:
+        if len(feature_list) != 3:
+            raise ValueError("An alert must contain exactly three top features.")
+    elif feature_list:
         raise ValueError("Unclassified alerts cannot contain SHAP feature values.")
     clean_features = [
         {
             "feature": str(item["feature"]),
             "value": float(item["value"]),
-            "shap_value": float(item["shap_value"]),
+            "shap_value": (
+                None
+                if item.get("shap_value") is None
+                else float(item["shap_value"])
+            ),
         }
-        for item in top_features
+        for item in feature_list
     ]
-    return {
+    record = {
         "alert_id": str(alert_id),
         "window_index": int(window_index),
         "layer1_score": None if layer1_score is None else float(layer1_score),
@@ -54,6 +64,9 @@ def build_alert_record(
         "model_version": None if model_version is None else str(model_version),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if layer1_flagged is not None:
+        record["layer1_flagged"] = bool(layer1_flagged)
+    return record
 
 
 def describe_alert(alert: dict[str, Any]) -> str:
@@ -61,16 +74,30 @@ def describe_alert(alert: dict[str, Any]) -> str:
     predicted = alert.get("predicted_class", "unknown")
     score = alert.get("layer1_score")
     probability = alert.get("class_probability")
+    layer1_flagged = alert.get("layer1_flagged")
     if predicted == "unknown":
         return (
             f"Layer 1 flagged this window (score: {score}); no classifier "
             "or feature attribution was available."
         )
-    summary = (
-        f"Layer 2 predicted {predicted} "
-        f"(probability: {probability}) after Layer 1 flagged the window "
-        f"(score: {score})."
-    )
+    if predicted == "unknown_anomaly":
+        return (
+            f"Layer 1 flagged this window as anomalous (score: {score}), "
+            "but Layer 2 classified it as normal; no attack class or "
+            "feature attribution was assigned."
+        )
+    if layer1_flagged is False:
+        summary = (
+            f"Layer 2 predicted {predicted} "
+            f"(probability: {probability}); Layer 1 did not flag the window "
+            f"(score: {score})."
+        )
+    else:
+        summary = (
+            f"Layer 2 predicted {predicted} "
+            f"(probability: {probability}) after Layer 1 flagged the window "
+            f"(score: {score})."
+        )
     features = alert.get("top_features") or []
     if features:
         contributions = ", ".join(

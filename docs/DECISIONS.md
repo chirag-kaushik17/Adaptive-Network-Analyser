@@ -142,3 +142,48 @@ The complete per-seed result for every candidate is in
 `logs/phase4_drift_sweep.txt`. The chosen candidate minimizes false-run count
 first because the required zero-false set was empty; it does not minimize
 detection delay across the full grid.
+
+## Detection simplification decisions
+
+### Static Layer 1 default and opt-in adaptive/drift refits
+
+In Phase 5 research evaluation, adaptive periodic refitting consistently lowered
+attack recall compared to the static baseline (and resulted in a Phase 5 NO-GO
+verdict). When attacks or contaminated traffic occur, false negatives entering
+the adaptation buffer can poison subsequent refits, and drift refits can adapt
+away valid anomaly detections.
+
+Consequently, the operational design simplifies Layer 1:
+- `AtaPipeline`, API configuration (`create_app`), `serve.py`, and the CLI
+  (`run.py`) default to a `static` baseline (fitted once on warm-up and never
+  refit).
+- Periodic adaptive refits and drift-triggered refits remain available as an
+  explicit opt-in experiment via `--layer1-mode static|adaptive|drift`.
+- `evaluate.py` (Phase 5) retains the ability to evaluate all three modes
+  (`static`, `adaptive_periodic`, `adaptive_drift`) without changes, and the
+  recorded Phase 5 research NO-GO verdict is preserved unchanged.
+
+### Layer 2 evaluation on every window and alert rules
+
+To maximize recall and provide robust defense-in-depth:
+- After warm-up, Layer 2 evaluates the classifier on every window, rather than
+  gating classifier inference only on Layer 1 anomaly flags.
+- If Layer 2 predicts any attack class (other than `"normal"`), an alert is
+  emitted. The alert records `layer1_flagged` (`True` or `False`) to indicate
+  whether Layer 1 also detected the anomaly.
+- If Layer 1 flags a window that Layer 2 calls `"normal"`, an alert is emitted
+  with `predicted_class="unknown_anomaly"` and null SHAP features (`top_features=[]`),
+  ensuring novel or unmodeled anomalies are not silently dropped.
+- If no classifier is loaded, the pipeline behaves as before, generating alerts
+  only when Layer 1 flags a window (`predicted_class="unknown"`).
+
+### Dead code removal
+
+- Deleted unused quarantine and promotion policies (`policy`, `promote_after`,
+  `_maybe_promote`, and quarantine state variables) from `BaseBaseline` and
+  `AdaptiveBaseline`.
+- Deleted `LegacyShiftMonitor` from `ata.drift`.
+- Removed the unused `"Promotions"` metric and always-empty `"severity"` column
+  from API stats and the dashboard.
+- Removed duplicate flow batch validation in the API's `/flows` endpoint.
+

@@ -255,49 +255,9 @@ class DriftMonitor:
         return False
 
 
-class LegacyShiftMonitor:
-    """The former half-window mean-shift detector for compatibility/testing."""
-
-    def __init__(self, reference=None, min_features: int = 3, window_size: int = 12):
-        self.reference = None if reference is None else _as_matrix(reference)
-        self.min_features = int(min_features)
-        self.window_size = int(window_size)
-        self._recent: list[np.ndarray] = []
-        self.last_shift_count = 0
-        self.drifted = False
-
-    def reset_reference(self, reference=None) -> None:
-        self.reference = None if reference is None else _as_matrix(reference)
-        self._recent.clear()
-        self.last_shift_count = 0
-        self.drifted = False
-
-    def update(self, row, position=None) -> bool:
-        row_arr = _as_matrix(row)
-        if row_arr.size == 0:
-            return False
-        if self.reference is None:
-            self.reference = row_arr.copy()
-            self._recent = [row_arr.copy()]
-            self.last_shift_count = 0
-            self.drifted = False
-            return False
-        self._recent.append(row_arr.copy())
-        recent = np.asarray(self._recent[-self.window_size :], dtype=float)
-        if recent.shape[0] < 2:
-            return False
-        midpoint = max(1, recent.shape[0] // 2)
-        self.last_shift_count = n_shifted_features(
-            recent[midpoint:], recent[:midpoint], self.reference
-        )
-        self.drifted = self.last_shift_count >= self.min_features
-        return self.drifted
-
-
 __all__ = [
     "DriftMonitor",
     "DriftResult",
-    "LegacyShiftMonitor",
     "n_shifted_features",
     "population_stability_index",
 ]

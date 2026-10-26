@@ -1,16 +1,3 @@
-"""Frozen regression criteria; do not tune these values."""
+"""Re-export from ata.thresholds for backward compatibility."""
 
-ATTACK_MEAN_RECALL_MIN = 0.60
-ATTACK_MEAN_FALSE_ALARM_MAX = 0.15
-NORMAL_MEAN_FALSE_ALARM_MAX = 0.15
-
-# Phase 4 drift acceptance thresholds; freeze before smoke-seed evaluation.
-PHASE4_STABLE_DRIFT_EVENTS_MAX = 0
-PHASE4_DRIFT_EVENTS_MIN = 1
-PHASE4_FIRST_EVENT_AFTER_START = True
-
-# Phase 5 GO/NO-GO criteria; freeze before running seeds 200-204.
-PHASE5_DRIFT_RECALL_TOLERANCE = 0.05
-PHASE5_STABLE_FAR_TOLERANCE = 0.02
-PHASE5_STABLE_RECALL_TOLERANCE = 0.05
-PHASE5_DRIFT_FAR_WINS_REQUIRED = 4
+from ata.thresholds import *  # noqa: F401,F403
